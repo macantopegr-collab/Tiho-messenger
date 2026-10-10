@@ -962,3 +962,15 @@ body.secret-shield .msgs,body.secret-shield .chat-list .ci-prev{filter:blur(16px
 .bot-hero small{color:var(--muted);font-size:12px;line-height:1.4}
 .theme-seg.wrap{flex-wrap:wrap}
 .theme-seg.wrap button{flex:1 1 45%}
+
+/* ---------- v20: перевод и расшифровка ---------- */
+.tr-box{margin-top:6px;padding:6px 10px;border-left:3px solid var(--accent);background:var(--quote-in);border-radius:4px 10px 10px 4px;display:flex;flex-direction:column;gap:3px;font-size:14px;white-space:pre-wrap}
+.out .tr-box{background:var(--out-quote);border-left-color:currentColor}
+.tr-box small{display:flex;align-items:center;gap:4px;font-size:11px;opacity:.75;white-space:normal}
+.tr-box .spin{display:inline-block;vertical-align:middle;margin-right:6px}
+.tr-box.bad,.stt-box.bad{opacity:.75;font-style:italic}
+.stt-btn{align-self:flex-start;display:inline-flex;align-items:center;justify-content:center;width:30px;height:24px;margin-top:4px;border:0;border-radius:8px;background:var(--quote-in);color:var(--accent);cursor:pointer}
+.out .stt-btn{background:var(--out-quote);color:inherit}
+.stt-box{margin-top:6px;font-size:14px;line-height:1.4;white-space:pre-wrap;max-width:300px}
+.bubble.round-b .stt-btn,.bubble.round-b .stt-box{background:var(--surface);padding:6px 10px;border-radius:12px;color:var(--text)}
+.bubble.round-b .stt-btn{padding:0}

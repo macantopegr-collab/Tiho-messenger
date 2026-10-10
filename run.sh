@@ -81,6 +81,7 @@ EOF2
 fi
 # Старые настройки дополняем новыми полями
 grep -q '^FXTUNNEL_TOKEN=' "$ENV_FILE" || printf '\n# Адрес через fxTunnel (fxtun.ru) — открывается в России без VPN.\n# Токен: зарегистрируйтесь на fxtun.ru → «Токены» → «Создать ключ».\nFXTUNNEL_TOKEN=\n# Имя адреса: tiho-ivan → https://tiho-ivan.fxtun.ru (латиница, цифры, дефис)\nFXTUNNEL_SUBDOMAIN=\n' >> "$ENV_FILE"
+grep -q '^STT_API_KEY=' "$ENV_FILE" || printf '\n# Точная расшифровка голосовых (необязательно): бесплатный ключ с console.groq.com\nSTT_API_KEY=\n' >> "$ENV_FILE"
 grep -q '^ADMINS=' "$ENV_FILE" || printf '\n# Модераторы жалоб: юзернеймы через запятую (пусто — первый зарегистрированный)\nADMINS=\n' >> "$ENV_FILE"
 grep -q '^ANDROID_SHA256=' "$ENV_FILE" || printf '\n# Приложение Android: отпечаток ключа из сборки (fingerprint.txt, см. ИНСТРУКЦИЯ.md)\nANDROID_SHA256=\n' >> "$ENV_FILE"
 grep -q '^TURN_URL=' "$ENV_FILE" || printf '\n# Звонки через сложные сети: свой TURN-сервер (см. ИНСТРУКЦИЯ.md)\nTURN_URL=\nTURN_SECRET=\n' >> "$ENV_FILE"

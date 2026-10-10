@@ -1,6 +1,6 @@
 /* Минимальный service worker: позволяет установить «Тихо» как приложение
    и открывать оболочку без сети. Запросы к API не кешируются. */
-const CACHE = 'tiho-v22';
+const CACHE = 'tiho-v23';
 const SHELL = ['/', '/index.html', '/app.css', '/app.js', '/crypto.js', '/gifts.js', '/stickers.js', '/manifest.json', '/icon.svg', '/icon-192.png'];
 
 self.addEventListener('install', (e) => {
@@ -12,7 +12,7 @@ self.addEventListener('activate', (e) => {
 });
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  if (e.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api') || url.pathname.startsWith('/ws')) return;
+  if (e.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api') || url.pathname.startsWith('/ws') || url.pathname.startsWith('/ai/')) return;
   e.respondWith(
     fetch(e.request).then((res) => {
       if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); }

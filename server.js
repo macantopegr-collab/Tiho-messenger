@@ -400,9 +400,9 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Content-Security-Policy',
-    "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; " +
+    "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; worker-src 'self' blob:; " +
     "style-src 'self' https://fonts.googleapis.com https://accounts.google.com 'unsafe-inline'; font-src https://fonts.gstatic.com; " +
-    "connect-src 'self' ws: wss: https://accounts.google.com; script-src 'self' https://accounts.google.com/gsi/client; " +
+    "connect-src 'self' blob: ws: wss: https://accounts.google.com; script-src 'self' 'wasm-unsafe-eval' https://accounts.google.com/gsi/client; " +
     "frame-src https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'");
   next();
 });
@@ -428,7 +428,10 @@ const fail = (res, code, error) => res.status(code).json({ error });
 
 const json = express.json({ limit: '256kb' });
 
-app.get('/api/config', (req, res) => res.json({ maxFile: MAX_FILE, googleClientId: GOOGLE_CLIENT_ID || null, reactions: REACTIONS, gifSearch: !!GIPHY_API_KEY }));
+const STT_API_KEY = (process.env.STT_API_KEY || '').trim();
+const STT_API_URL = (process.env.STT_API_URL || 'https://api.groq.com/openai/v1/audio/transcriptions').trim();
+const STT_MODEL = (process.env.STT_MODEL || 'whisper-large-v3-turbo').trim();
+app.get('/api/config', (req, res) => res.json({ maxFile: MAX_FILE, googleClientId: GOOGLE_CLIENT_ID || null, reactions: REACTIONS, gifSearch: !!GIPHY_API_KEY, sttServer: !!STT_API_KEY }));
 
 /* ---------- Поиск GIF через GIPHY (через наш сервер, чтобы GIPHY не видел пользователей) ---------- */
 const gifUrl = (u) => '/api/gif/file?u=' + encodeURIComponent(u);
@@ -587,6 +590,165 @@ app.get('/api/link-preview/image', auth, async (req, res) => {
     res.setHeader('Cache-Control', 'private, max-age=3600');
     res.end(b);
   } catch { fail(res, 404, 'Нет картинки'); }
+});
+
+/* ---------- Перевод сообщений ----------
+ * Текст отправляется переводчику только по нажатию «Перевести» (с предупреждением в приложении). */
+const trCache = new Map();
+async function translateText(text, to) {
+  const key = to + '|' + text;
+  if (trCache.has(key)) return trCache.get(key);
+  const r = await translateUncached(text, to);
+  if (trCache.size > 1000) trCache.delete(trCache.keys().next().value);
+  trCache.set(key, r);
+  return r;
+}
+async function translateUncached(text, to) {
+  const tries = [
+    async () => {
+      const u = new URL('https://translate.googleapis.com/translate_a/single');
+      for (const [k, v] of Object.entries({ client: 'gtx', sl: 'auto', tl: to, dt: 't', q: text })) u.searchParams.set(k, v);
+      const r = await fetch(u, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) throw new Error('google ' + r.status);
+      const d = await r.json();
+      return { text: (d[0] || []).map((x) => x[0]).join(''), from: d[2] || '', engine: 'Google Переводчик' };
+    },
+    async () => {
+      const u = new URL('https://clients5.google.com/translate_a/t');
+      for (const [k, v] of Object.entries({ client: 'dict-chrome-ex', sl: 'auto', tl: to, q: text })) u.searchParams.set(k, v);
+      const r = await fetch(u, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) throw new Error('google2 ' + r.status);
+      const d = await r.json();
+      const item = Array.isArray(d) ? d[0] : null;
+      const out = Array.isArray(item) ? { text: String(item[0] || ''), from: String(item[1] || '') } : typeof item === 'string' ? { text: item, from: '' } : null;
+      if (!out?.text) throw new Error('google2 empty');
+      return { ...out, engine: 'Google Переводчик' };
+    },
+    async () => {
+      const u = new URL('https://api.mymemory.translated.net/get');
+      u.searchParams.set('q', text.slice(0, 480)); u.searchParams.set('langpair', 'autodetect|' + to);
+      const r = await fetch(u, { signal: AbortSignal.timeout(8000) });
+      const d = await r.json();
+      if (!d?.responseData?.translatedText || Number(d.responseStatus) !== 200 || /MYMEMORY WARNING/i.test(d.responseData.translatedText)) throw new Error('mymemory');
+      return { text: d.responseData.translatedText, from: d.responseData.detectedLanguage || '', engine: 'MyMemory' };
+    },
+  ];
+  for (const t of tries) { try { const r = await t(); if (r.text) return r; } catch (e) { console.warn('translate:', e.message, e.cause?.message || ''); } }
+  throw new Error('Переводчик недоступен');
+}
+app.post('/api/translate', auth, json, async (req, res) => {
+  if (rateLimited('tr:' + req.user.id, 60, 60000)) return fail(res, 429, 'Слишком часто');
+  const text = String(req.body?.text || '').slice(0, 4000).trim();
+  const to = /^[a-z]{2}(-[A-Z]{2})?$/.test(req.body?.to || '') ? req.body.to : 'ru';
+  if (!text) return fail(res, 400, 'Пустой текст');
+  try { res.json(await translateText(text, to)); } catch (e) { fail(res, 502, e.message); }
+});
+
+/* Точное распознавание через внешний сервис (Groq/OpenAI) — только если задан STT_API_KEY и пользователь сам включил */
+app.post('/api/stt', auth, express.raw({ type: ['audio/*', 'video/*', 'application/octet-stream'], limit: '25mb' }), async (req, res) => {
+  if (!STT_API_KEY) return fail(res, 400, 'Серверное распознавание не настроено');
+  if (rateLimited('stt:' + req.user.id, 30, 3600000)) return fail(res, 429, 'Слишком много расшифровок, подождите');
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return fail(res, 400, 'Пустой звук');
+  try {
+    const type = String(req.headers['content-type'] || 'audio/webm').split(';')[0];
+    const form = new FormData();
+    form.append('file', new Blob([req.body], { type }), 'voice.' + (type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm'));
+    form.append('model', STT_MODEL);
+    if (/^[a-z]{2}$/.test(String(req.query.lang || ''))) form.append('language', String(req.query.lang));
+    form.append('response_format', 'json');
+    const r = await fetch(STT_API_URL, { method: 'POST', headers: { Authorization: 'Bearer ' + STT_API_KEY }, body: form, signal: AbortSignal.timeout(60000) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d?.error?.message || 'HTTP ' + r.status);
+    res.json({ text: String(d.text || '').trim() });
+  } catch (e) { console.warn('STT failed:', e.message); fail(res, 502, 'Сервис распознавания не ответил'); }
+});
+
+/* ---------- Распознавание речи на устройстве (Whisper) ----------
+ * Сервер только раздаёт файлы модели и библиотеки, скачав их один раз; звук сюда не попадает. */
+const AI_DIR = path.join(DATA_DIR, 'ai');
+fs.mkdirSync(AI_DIR, { recursive: true });
+const TJS_VERSION = '3.8.1';
+const AI_MODEL = 'onnx-community/whisper-base';
+const AI_MODEL_FILES = new Set(['config.json', 'generation_config.json', 'preprocessor_config.json', 'tokenizer.json', 'tokenizer_config.json',
+  'special_tokens_map.json', 'added_tokens.json', 'vocab.json', 'merges.txt', 'normalizer.json',
+  'onnx/encoder_model_quantized.onnx', 'onnx/decoder_model_merged_quantized.onnx']);
+const HF_HOSTS = [process.env.AI_MIRROR, 'https://huggingface.co', 'https://hf-mirror.com'].filter(Boolean);
+const NPM_HOSTS = ['https://registry.npmjs.org', 'https://registry.npmmirror.com'];
+const aiJobs = new Map();
+async function downloadTo(url, dest) {
+  const r = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(10 * 60000) });
+  if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
+  const tmp = dest + '.part';
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  await require('stream/promises').pipeline(require('stream').Readable.fromWeb(r.body), fs.createWriteStream(tmp));
+  fs.renameSync(tmp, dest);
+}
+function once(key, fn) {
+  if (!aiJobs.has(key)) aiJobs.set(key, fn().finally(() => aiJobs.delete(key)));
+  return aiJobs.get(key);
+}
+async function ensureModelFile(file) {
+  const dest = path.join(AI_DIR, 'model', file);
+  if (fs.existsSync(dest)) return dest;
+  return once('m:' + file, async () => {
+    let last;
+    for (const host of HF_HOSTS) {
+      try { await downloadTo(`${host}/${AI_MODEL}/resolve/main/${file}`, dest); return dest; } catch (e) { last = e; }
+    }
+    throw last || new Error('нет источника');
+  });
+}
+async function ensureVendor() {
+  const need = ['transformers.min.js', 'ort-wasm-simd-threaded.jsep.mjs', 'ort-wasm-simd-threaded.jsep.wasm'];
+  const dir = path.join(AI_DIR, 'vendor-' + TJS_VERSION);
+  if (need.every((f) => fs.existsSync(path.join(dir, f)))) return dir;
+  return once('vendor', async () => {
+    let buf, last;
+    for (const host of NPM_HOSTS) {
+      try {
+        const r = await fetch(`${host}/@huggingface/transformers/-/transformers-${TJS_VERSION}.tgz`, { signal: AbortSignal.timeout(5 * 60000) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        buf = require('zlib').gunzipSync(Buffer.from(await r.arrayBuffer()));
+        break;
+      } catch (e) { last = e; }
+    }
+    if (!buf) throw last || new Error('нет источника');
+    fs.mkdirSync(dir, { recursive: true });
+    // простейший разбор tar: заголовки по 512 байт
+    for (let off = 0; off + 512 <= buf.length;) {
+      const name = buf.subarray(off, off + 100).toString().replace(/\0.*$/s, '');
+      if (!name) break;
+      const prefix = buf.subarray(off + 345, off + 500).toString().replace(/\0.*$/s, '');
+      const size = parseInt(buf.subarray(off + 124, off + 136).toString().replace(/\0.*$/s, '').trim() || '0', 8);
+      const full = (prefix ? prefix + '/' : '') + name;
+      const base = full.replace(/^package\/dist\//, '');
+      if (full.startsWith('package/dist/') && need.includes(base)) fs.writeFileSync(path.join(dir, base), buf.subarray(off + 512, off + 512 + size));
+      off += 512 + Math.ceil(size / 512) * 512;
+    }
+    if (!need.every((f) => fs.existsSync(path.join(dir, f)))) throw new Error('в пакете нет нужных файлов');
+    return dir;
+  });
+}
+app.get('/ai/vendor/:file', auth, async (req, res) => {
+  const f = String(req.params.file);
+  if (!['transformers.min.js', 'ort-wasm-simd-threaded.jsep.mjs', 'ort-wasm-simd-threaded.jsep.wasm'].includes(f)) return fail(res, 404, 'Нет файла');
+  try {
+    const dir = await ensureVendor();
+    res.setHeader('Content-Type', f.endsWith('.wasm') ? 'application/wasm' : 'text/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+    fs.createReadStream(path.join(dir, f)).pipe(res);
+  } catch (e) { console.warn('AI vendor download failed:', e.message); fail(res, 502, 'Не удалось скачать библиотеку распознавания'); }
+});
+app.get(/^\/ai\/hf\/onnx-community\/whisper-base\/resolve\/main\/(.+)$/, auth, async (req, res) => {
+  const file = req.params[0];
+  if (!AI_MODEL_FILES.has(file)) return fail(res, 404, 'Нет файла');
+  try {
+    const p = await ensureModelFile(file);
+    res.setHeader('Content-Type', file.endsWith('.json') ? 'application/json' : 'application/octet-stream');
+    res.setHeader('Content-Length', fs.statSync(p).size);
+    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+    fs.createReadStream(p).pipe(res);
+  } catch (e) { console.warn('AI model download failed:', file, e.message); fail(res, 502, 'Не удалось скачать модель распознавания'); }
 });
 
 /* ---------- Вход через Google (проверка ID-токена Google Identity Services) ---------- */
@@ -2394,7 +2556,7 @@ app.get('/.well-known/assetlinks.json', (req, res) => {
 });
 
 app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html', maxAge: '1h' }));
-app.get(/^\/(?!api|ws).*/, (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get(/^\/(?!api|ws|ai\/).*/, (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 /* ---------- Групповые звонки: каждый соединяется с каждым (mesh), сервер только передаёт сигналы ---------- */
 const rooms = new Map(); // chatId -> { id, kind, startedAt, by, maxPeers, peers: Map<userId, {ws, muted, video, screen, joinedAt}> }

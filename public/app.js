@@ -91,6 +91,8 @@
     minimize: '<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/>',
     bellOff: '<path d="M3 3l18 18M8.7 3.9A6 6 0 0 1 18 8c0 3.4.7 5.6 1.5 7M6 8c0 7-3 9-3 9h14M10 21h4"/>',
     bot: '<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01M9.5 16.5h5M2 13v3M22 13v3"/><circle cx="12" cy="3.5" r="1"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+    textLines: '<path d="M4 6h16M4 10h16M4 14h10M4 18h7"/>',
     flag: '<path d="M5 21V4h11l-1.5 4L16 12H5"/>',
     block: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
     devices: '<rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M6 18h6"/><rect x="17" y="8" width="5" height="12" rx="1.2"/>',
@@ -212,8 +214,9 @@
   }
 
   /* ---------- состояние ---------- */
+  const isVoiceLike = (p) => p?.t === 'file' && (p.round || (p.mime.startsWith('audio/') && p.wave));
   const S = {
-    me: null, priv: null, pub: null, config: { maxFile: 25 * 1024 * 1024 },
+    extra: new Map(), me: null, priv: null, pub: null, config: { maxFile: 25 * 1024 * 1024 },
     chats: new Map(), msgs: new Map(), plain: new Map(), userKeys: new Map(),
     active: null, filter: 'all', query: '', people: [], typing: new Map(),
     tab: 'chats', page: null, channels: new Map(), cposts: new Map(), channel: null, channelHits: [], folders: [], searchQ: '', wallet: null, catalog: null, reply: null, edit: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
@@ -1485,12 +1488,14 @@
     if (p.reply) {
       bubble.append(h('button', { class: 'quote', onclick: () => p.reply.id && jumpTo(p.reply.id) }, h('b', null, p.reply.name), h('span', null, p.reply.text)));
     }
+    const ex = S.extra.get(m.id);
     if (p.t === 'bot') {
       bubble.classList.add('bot-b');
       bubble.append(h('span', { style: 'white-space:pre-wrap' }, ...linkify(p.text)), meta);
     } else if (p.t === 'text') {
       bubble.append(...richText(p.text, chat));
       if (p.link) bubble.append(linkCard(p.link));
+      if (ex?.tr) bubble.append(trBox(m, ex.tr));
       bubble.append(meta);
       if (!mine && mentionsMe(p.text)) bubble.classList.add('mentioned');
     } else if (p.t === 'sticker') {
@@ -1507,11 +1512,13 @@
       bubble.append(h('span', { class: 'del' }, icon('trash', 15, 1.8), 'Сообщение удалено'), meta);
     } else if (p.t === 'file' && p.round) {
       bubble.classList.add('round-b');
-      bubble.append(roundEl(p), meta);
+      bubble.append(roundEl(p));
+      bubble.append(...sttParts(m, p), meta);
     } else if (p.t === 'file') {
       bubble.classList.add('media');
       if (p.mime.startsWith('audio/') && p.wave) bubble.classList.add('voice-b');
       bubble.append(isSecret(chat) && p.mime.startsWith('image/') ? onceEl(m, p, mine) : p.mime.startsWith('image/') ? imageEl(p) : p.mime.startsWith('audio/') && p.wave ? voiceEl(p, mine) : fileEl(p));
+      if (p.mime.startsWith('audio/') && p.wave) bubble.append(...sttParts(m, p));
       if (p.caption) bubble.append(h('div', { class: 'cap', style: 'white-space:pre-wrap' }, ...richText(p.caption, chat), meta));
       if (p.caption && !mine && mentionsMe(p.caption)) bubble.classList.add('mentioned');
       else bubble.append(h('div', { class: 'cap', style: 'padding-top:0' }, meta));
@@ -1542,6 +1549,8 @@
         ['reply', 'Ответить', () => setReply(m, p, senderName)],
         chat.type === 'group' && !m.threadId && ['chat', 'Обсудить в ветке', () => openThread(chat, m)],
         p.t === 'text' && ['copy', 'Копировать текст', () => copyText(p.text)],
+        p.t === 'text' && !isSecret(chat) && (S.extra.get(m.id)?.tr ? ['globe', 'Скрыть перевод', () => { S.extra.get(m.id).tr = null; renderMessages('keep'); }] : ['globe', 'Перевести', () => translateMsg(m, p)]),
+        isVoiceLike(p) && ['textLines', 'Расшифровать', () => transcribeMsg(m, p)],
         isGif(p) && ['image', 'Сохранить в «Мои GIF»', () => { saveGif(p); toast('GIF сохранён'); }],
         p.t === 'file' && ['download', 'Скачать файл', () => downloadFile(p)],
         p.t === 'file' && p.caption && ['copy', 'Копировать подпись', () => copyText(p.caption)],
@@ -2818,7 +2827,9 @@
         h('button', { class: 'card-row', onclick: () => { close(); openBlocked(); } }, h('span', { class: 'ic' }, icon('block', 19, 1.9)),
           h('span', { class: 'grow' }, h('b', null, 'Заблокированные'), h('small', null, 'Не могут писать и звонить вам')), h('span', { class: 'chev' }, icon('chevron', 18))))),
       h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Сообщения'),
-        h('div', { class: 'card' }, settingsSw('tiho-link-preview', 'Предпросмотр ссылок', 'Карточку собирает ваш браузер через сервер «Тихо», собеседники ничего не загружают', 'link', null, true))),
+        h('div', { class: 'card' }, settingsSw('tiho-link-preview', 'Предпросмотр ссылок', 'Карточку собирает ваш браузер через сервер «Тихо», собеседники ничего не загружают', 'link', null, true),
+          settingsSw('tiho-translate-ok', 'Перевод без вопроса', 'Текст для перевода отправляется в Google Переводчик через ваш сервер', 'globe'),
+          S.config.sttServer ? settingsSw('tiho-stt-server', 'Точная расшифровка голосовых', 'Голосовое отправляется в сервис распознавания (Groq). Без этого — на устройстве, приватно, но менее точно', 'textLines') : null)),
       h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Шифрование'),
         h('div', { class: 'card', style: 'padding:14px 16px;display:flex;flex-direction:column;gap:10px' },
           h('div', { style: 'display:flex;align-items:center;gap:8px;font-weight:600' }, icon('key', 18), 'Отпечаток вашего ключа'), fp,
@@ -4158,6 +4169,118 @@
         catch (e) { toast(e.message); }
       } }, 'Вступить в группу'),
     ]);
+  }
+
+  /* ---------- Перевод и расшифровка ---------- */
+  const LANG_NAMES = { ru: 'русского', en: 'английского', uk: 'украинского', de: 'немецкого', fr: 'французского', es: 'испанского', it: 'итальянского', tr: 'турецкого', zh: 'китайского', ja: 'японского', ko: 'корейского', kk: 'казахского', uz: 'узбекского', be: 'белорусского', pl: 'польского', ar: 'арабского' };
+  const myLang = () => store.get('tiho-tr-lang', (navigator.language || 'ru').slice(0, 2).toLowerCase());
+  function trBox(m, tr) {
+    if (tr === 'loading') return h('div', { class: 'tr-box' }, h('span', { class: 'spin sm' }), 'Перевожу…');
+    if (tr.error) return h('div', { class: 'tr-box bad' }, tr.error);
+    return h('div', { class: 'tr-box' }, h('small', null, icon('globe', 12, 2), `Перевод${tr.from && LANG_NAMES[tr.from] ? ' с ' + LANG_NAMES[tr.from] : ''} · ${tr.engine}`),
+      h('div', { class: 'tr-text' }, tr.text));
+  }
+  async function translateOnDevice(text, to) {
+    if (!('Translator' in self) || !('LanguageDetector' in self)) return null;
+    try {
+      const det = await self.LanguageDetector.create();
+      const from = (await det.detect(text))[0]?.detectedLanguage;
+      if (!from || from === to) return from === to ? { same: true, from } : null;
+      if ((await self.Translator.availability({ sourceLanguage: from, targetLanguage: to })) === 'unavailable') return null;
+      const tr = await self.Translator.create({ sourceLanguage: from, targetLanguage: to });
+      return { text: await tr.translate(text), from, engine: 'на устройстве' };
+    } catch { return null; }
+  }
+  async function translateMsg(m, p) {
+    const ex = S.extra.get(m.id) || {};
+    S.extra.set(m.id, ex);
+    const to = myLang();
+    ex.tr = 'loading'; renderMessages('keep');
+    let r = await translateOnDevice(p.text, to);
+    if (!r) {
+      if (!store.get('tiho-translate-ok', false)) {
+        if (!confirm('Для перевода текст сообщения будет отправлен онлайн-переводчику (Google Переводчик) через ваш сервер. Переводить?')) { ex.tr = null; renderMessages('keep'); return; }
+        store.set('tiho-translate-ok', true);
+      }
+      try { r = await api('/api/translate', { body: { text: p.text, to } }); } catch (e) { r = { error: 'Не удалось перевести: ' + e.message }; }
+    }
+    if (r.same || (r.from && r.from === to && !r.error)) r = { error: 'Сообщение уже на вашем языке' };
+    ex.tr = r; renderMessages('keep');
+  }
+  /* Расшифровка голосовых и кружков — на устройстве */
+  function sttParts(m, p) {
+    const ex = S.extra.get(m.id);
+    const out = [];
+    if (!ex?.stt) out.push(h('button', { class: 'stt-btn', 'aria-label': 'Расшифровать', title: 'Расшифровать в текст', onclick: (e) => { e.stopPropagation(); transcribeMsg(m, p); } }, icon('textLines', 15, 2.2)));
+    else out.push(h('div', { class: 'stt-box' + (ex.stt.error ? ' bad' : ''), 'data-stt': m.id }, ex.stt.text != null ? ex.stt.text || '(тишина)' : ex.stt.error || ex.stt.status || 'Распознаю…'));
+    return out;
+  }
+  let sttWorker = null, sttSeq = 0;
+  const sttWait = new Map();
+  function sttStatus(id, text) {
+    const ex = S.extra.get(id);
+    if (ex?.stt) ex.stt.status = text;
+    document.querySelectorAll(`.stt-box[data-stt="${id}"]`).forEach((el) => { el.textContent = text; });
+  }
+  function getStt() {
+    if (sttWorker) return sttWorker;
+    sttWorker = new Worker('/stt-worker.js', { type: 'module' });
+    sttWorker.onmessage = ({ data }) => {
+      if (data.type === 'progress') {
+        const pct = Math.floor(data.loaded / data.total * 100);
+        for (const id of sttWait.keys()) sttStatus(id, `Загружаю модель распознавания: ${pct}% из ${Math.round(data.total / 1048576)} МБ (один раз)`);
+        return;
+      }
+      const w = sttWait.get(data.reqId ?? [...sttWait.keys()][0]);
+      if (data.type === 'working') { for (const [id, x] of sttWait) if (x.req === data.id) sttStatus(id, 'Распознаю речь…'); return; }
+      for (const [id, x] of sttWait) {
+        if (x.req !== data.id) continue;
+        sttWait.delete(id);
+        const ex = S.extra.get(id);
+        if (ex) ex.stt = data.type === 'done' ? { text: data.text } : { error: 'Не удалось распознать' + (data.error ? ': ' + data.error.slice(0, 80) : '') };
+        renderMessages('keep'); if (S.thread) drawThread();
+      }
+      void w;
+    };
+    sttWorker.onerror = () => {
+      for (const id of sttWait.keys()) { const ex = S.extra.get(id); if (ex) ex.stt = { error: 'Распознавание не запустилось в этом браузере' }; }
+      sttWait.clear(); sttWorker = null; renderMessages('keep');
+    };
+    return sttWorker;
+  }
+  async function transcribeMsg(m, p) {
+    const ex = S.extra.get(m.id) || {};
+    S.extra.set(m.id, ex);
+    if (ex.stt?.text != null || sttWait.has(m.id)) return;
+    ex.stt = { status: 'Готовлю звук…' };
+    renderMessages('keep');
+    try {
+      const url = await getFileUrl(p);
+      const buf = await (await fetch(url)).arrayBuffer();
+      if (S.config.sttServer && store.get('tiho-stt-server', false)) {
+        sttStatus(m.id, 'Распознаю на сервере…');
+        try {
+          const r = await api('/api/stt?lang=' + encodeURIComponent(myLang()), { raw: buf, type: p.mime.split(';')[0] || 'audio/webm' });
+          ex.stt = { text: r.text }; renderMessages('keep'); if (S.thread) drawThread();
+          return;
+        } catch (e) { sttStatus(m.id, 'Сервер не ответил, распознаю на устройстве…'); }
+      }
+      const ac = new OfflineAudioContext(1, 16000, 16000);
+      const decoded = await ac.decodeAudioData(buf);
+      let audio = decoded.getChannelData(0);
+      if (decoded.numberOfChannels > 1) {
+        const r = decoded.getChannelData(1);
+        audio = audio.map((v, i) => (v + r[i]) / 2);
+      }
+      const req = ++sttSeq;
+      sttWait.set(m.id, { req });
+      sttStatus(m.id, 'Запускаю распознавание…');
+      const WL = { ru: 'russian', en: 'english', uk: 'ukrainian', de: 'german', fr: 'french', es: 'spanish', it: 'italian', tr: 'turkish', kk: 'kazakh', uz: 'uzbek', be: 'belarusian', pl: 'polish' };
+      getStt().postMessage({ id: req, audio, language: store.get('tiho-stt-lang', WL[myLang()] || null) }, [audio.buffer]);
+    } catch (e) {
+      ex.stt = { error: 'Не удалось прочитать звук' };
+      renderMessages('keep');
+    }
   }
 
   /* ---------- Тихобот ---------- */
