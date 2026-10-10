@@ -85,6 +85,7 @@ EOF
   chmod 600 "$ENV_FILE"
 fi
 
+grep -q '^ADMINS=' "$ENV_FILE" || printf '\n# Модераторы жалоб: юзернеймы через запятую (пусто — первый зарегистрированный)\nADMINS=\n' >> "$ENV_FILE"
 grep -q '^ANDROID_SHA256=' "$ENV_FILE" || printf '\n# Приложение Android: отпечаток ключа из сборки (fingerprint.txt, см. ИНСТРУКЦИЯ.md)\nANDROID_SHA256=\n' >> "$ENV_FILE"
 grep -q '^TURN_URL=' "$ENV_FILE" || printf '\n# Звонки через сложные сети: свой TURN-сервер (см. ИНСТРУКЦИЯ.md)\nTURN_URL=\nTURN_SECRET=\n' >> "$ENV_FILE"
 grep -q '^GIPHY_API_KEY=' "$ENV_FILE" || printf '\n# Поиск GIF: бесплатный ключ с developers.giphy.com (см. ИНСТРУКЦИЯ.md)\nGIPHY_API_KEY=\n' >> "$ENV_FILE"

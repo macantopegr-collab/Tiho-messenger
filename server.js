@@ -119,6 +119,22 @@ CREATE TABLE IF NOT EXISTS files (
     file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
     PRIMARY KEY (file_id, chat_id));`);
+  const scols = new Set(db.prepare('PRAGMA table_info(sessions)').all().map((c) => c.name));
+  if (!scols.has('created_at')) db.exec('ALTER TABLE sessions ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0');
+  if (!scols.has('last_active')) db.exec('ALTER TABLE sessions ADD COLUMN last_active INTEGER NOT NULL DEFAULT 0');
+  if (!scols.has('user_agent')) db.exec("ALTER TABLE sessions ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''");
+  if (!scols.has('ip')) db.exec("ALTER TABLE sessions ADD COLUMN ip TEXT NOT NULL DEFAULT ''");
+  if (!cols.has('banned')) db.exec('ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0');
+  db.exec(`CREATE TABLE IF NOT EXISTS blocks (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, blocked_id));
+  CREATE TABLE IF NOT EXISTS reports (
+    id INTEGER PRIMARY KEY, reporter_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL, target_id INTEGER NOT NULL, target_user_id INTEGER, reason TEXT NOT NULL,
+    comment TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open', handled_by INTEGER, handled_at INTEGER);`);
   db.exec(`CREATE TABLE IF NOT EXISTS mentions (
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -141,13 +157,13 @@ const q = {
   insertUser: db.prepare(`INSERT INTO users (username, display_name, pass_hash, public_key, key_backup, color, created_at)
                           VALUES (?, ?, ?, ?, ?, ?, ?)`),
   updateProfile: db.prepare('UPDATE users SET display_name = ? WHERE id = ?'),
-  insertSession: db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)'),
-  sessionUser: db.prepare(`SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
-                           WHERE s.token_hash = ? AND s.expires_at > ?`),
+  insertSession: db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at, last_active, user_agent, ip) VALUES (?, ?, ?, ?, ?, ?, ?)'),
+  sessionUser: db.prepare(`SELECT u.*, s.rowid AS session_id, s.last_active AS session_active FROM sessions s JOIN users u ON u.id = s.user_id
+                           WHERE s.token_hash = ? AND s.expires_at > ? AND u.banned = 0`),
   deleteSession: db.prepare('DELETE FROM sessions WHERE token_hash = ?'),
   purgeSessions: db.prepare('DELETE FROM sessions WHERE expires_at <= ?'),
   searchUsers: db.prepare(`SELECT id, username, display_name, color, bio, avatar, last_seen FROM users
-                           WHERE (username LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\') AND id != ?
+                           WHERE (username LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\') AND id != ?  AND banned = 0
                            ORDER BY CASE WHEN lower(username) = lower(?) THEN 0
                                          WHEN username LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END, length(username), username
                            LIMIT 20`),
@@ -312,6 +328,7 @@ function chatView(chat, userId) {
     members, lastMessage: last ? messageView(last) : null,
     pinned: chat.pinned_id ? (() => { const pm = q.messageById.get(chat.pinned_id); return pm && pm.kind !== 'deleted' ? messageView(pm) : null; })() : null,
     archived: !!chat.archived,
+    blocked: chat.type === 'direct' ? blockState(userId, members.find((m) => m.id !== userId)?.id) : null,
     unread: chat.unread ?? 0, mentions: chat.mentions ?? 0, lastReadId: chat.last_read_id ?? members.find((m) => m.id === userId)?.lastReadId ?? 0,
   };
 }
@@ -356,11 +373,14 @@ function auth(req, res, next) {
   const user = token && q.sessionUser.get(sha256(token), now());
   if (!user) return res.status(401).json({ error: 'Нужно войти' });
   req.user = user;
+  req.sessionId = user.session_id;
+  if (now() - user.session_active > 5 * 60000) db.prepare('UPDATE sessions SET last_active = ?, ip = ? WHERE rowid = ?').run(now(), clientIp(req), user.session_id);
   next();
 }
+const clientIp = (req) => String((['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress) && req.headers['cf-connecting-ip']) || req.ip || '').slice(0, 64);
 function startSession(req, res, userId) {
   const token = crypto.randomBytes(32).toString('base64url');
-  q.insertSession.run(sha256(token), userId, now() + SESSION_DAYS * 86400000);
+  q.insertSession.run(sha256(token), userId, now() + SESSION_DAYS * 86400000, now(), now(), String(req.headers['user-agent'] || '').slice(0, 300), clientIp(req));
   res.setHeader('Set-Cookie', cookie.serialize('tiho_session', token, {
     httpOnly: true, sameSite: 'strict', secure: req.secure, path: '/', maxAge: SESSION_DAYS * 86400,
   }));
@@ -584,6 +604,7 @@ app.post('/api/google', json, async (req, res) => {
   let g;
   try { g = await verifyGoogle(req.body?.credential); } catch (e) { console.warn('Google sign-in rejected:', e.message); return fail(res, 401, 'Google не подтвердил вход, попробуйте ещё раз'); }
   const user = q.userByGoogle.get(g.sub);
+  if (user?.banned) return fail(res, 403, 'Аккаунт заблокирован за нарушение правил');
   if (user) return loginOrTicket(req, res, user);
   const ticket = crypto.randomBytes(24).toString('base64url');
   googleSignups.set(ticket, { sub: g.sub, email: g.email || null, name: cleanName(g.name) || null, exp: now() + 15 * 60000 });
@@ -631,6 +652,7 @@ app.post('/api/login', json, (req, res) => {
   if (!user || typeof authKey !== 'string' || !bcrypt.compareSync(authKey, user.pass_hash)) {
     return fail(res, 401, 'Неверный логин или пароль');
   }
+  if (user.banned) return fail(res, 403, 'Аккаунт заблокирован за нарушение правил');
   loginOrTicket(req, res, user);
 });
 
@@ -660,7 +682,7 @@ app.post('/api/logout', (req, res) => {
 app.get('/api/me', auth, (req, res) => {
   res.json({ user: publicUser(req.user), publicKey: req.user.public_key, keyBackup: JSON.parse(req.user.key_backup),
     google: req.user.google_sub ? (req.user.email || 'привязан') : null,
-    twoFactor: !!req.user.totp_secret, backupLeft: JSON.parse(req.user.backup_codes || '[]').length });
+    twoFactor: !!req.user.totp_secret, backupLeft: JSON.parse(req.user.backup_codes || '[]').length, admin: isAdmin(req.user) });
 });
 
 app.post('/api/2fa/setup', auth, async (req, res) => {
@@ -795,7 +817,7 @@ app.post('/api/chats/group', auth, json, (req, res) => {
   const title = cleanName(req.body?.title);
   const ids = Array.isArray(req.body?.memberIds) ? req.body.memberIds.map(Number) : [];
   if (!title) return fail(res, 400, 'Укажите название группы');
-  const valid = [...new Set(ids)].filter((id) => id !== req.user.id && q.userById.get(id)).slice(0, 199);
+  const valid = [...new Set(ids)].filter((id) => id !== req.user.id && q.userById.get(id) && !blockedBy(id, req.user.id)).slice(0, 199);
   let chatId;
   db.transaction(() => {
     chatId = q.insertChat.run('group', title, null, req.user.id, now()).lastInsertRowid;
@@ -821,7 +843,7 @@ app.post('/api/chats/:id/members', auth, json, (req, res) => {
   db.transaction(() => {
     for (const id of new Set(ids)) {
       const u = q.userById.get(id);
-      if (u && !q.isMember.get(chat.id, id)) { q.insertMember.run(chat.id, id, now()); added.push(u); }
+      if (u && !q.isMember.get(chat.id, id) && !blockedBy(id, req.user.id)) { q.insertMember.run(chat.id, id, now()); added.push(u); }
     }
     if (added.length) addSystem(chat.id, `${req.user.display_name} добавил(а): ${added.map((u) => u.display_name).join(', ')}`);
   })();
@@ -859,6 +881,12 @@ app.post('/api/chats/:id/messages', auth, json, (req, res) => {
   const chat = requireMember(req, res); if (!chat) return;
   const env = req.body?.envelope;
   if (!validEnvelope(env)) return fail(res, 400, 'Некорректное зашифрованное сообщение');
+  if (chat.type === 'direct') {
+    const otherId = q.memberIds.all(chat.id).map((r) => r.user_id).find((id) => id !== req.user.id);
+    const st = blockState(req.user.id, otherId);
+    if (st === 'me') return fail(res, 403, 'Вы заблокировали этого пользователя');
+    if (st === 'them') return fail(res, 403, 'Пользователь ограничил сообщения от вас');
+  }
   const info = q.insertMessage.run(chat.id, req.user.id, 'msg', JSON.stringify(env), now());
   q.setRead.run(info.lastInsertRowid, chat.id, req.user.id);
   /* Упоминания: текст зашифрован, поэтому клиент сам сообщает, кого отметил (только участников чата) */
@@ -1009,6 +1037,156 @@ app.get('/api/files/:id', auth, (req, res) => {
   fs.createReadStream(path.join(FILES_DIR, id)).pipe(res);
 });
 
+/* ---------- Блокировка пользователей ---------- */
+function blockedBy(blocker, target) { return !!db.prepare('SELECT 1 FROM blocks WHERE user_id = ? AND blocked_id = ?').get(blocker, target); }
+/* 'me' — я заблокировал собеседника, 'them' — он меня */
+function blockState(me, otherId) {
+  if (!otherId || otherId === me) return null;
+  return blockedBy(me, otherId) ? 'me' : blockedBy(otherId, me) ? 'them' : null;
+}
+function afterBlockChange(a, b) {
+  const chat = q.chatByDirectKey.get([a, b].sort((x, y) => x - y).join(':'));
+  if (chat) broadcastChat(chat.id);
+  sendTo(a, { type: 'blocks' });
+}
+app.get('/api/blocks', auth, (req, res) => {
+  const rows = db.prepare('SELECT u.* FROM blocks b JOIN users u ON u.id = b.blocked_id WHERE b.user_id = ? ORDER BY b.created_at DESC').all(req.user.id);
+  res.json({ users: rows.map(publicUser) });
+});
+app.post('/api/blocks', auth, json, (req, res) => {
+  const u = q.userById.get(Number(req.body?.userId));
+  if (!u || u.id === req.user.id) return fail(res, 404, 'Пользователь не найден');
+  db.prepare('INSERT OR IGNORE INTO blocks (user_id, blocked_id, created_at) VALUES (?, ?, ?)').run(req.user.id, u.id, now());
+  for (const [cid, live] of liveCalls) if ([live.caller, live.callee].includes(u.id) && [live.caller, live.callee].includes(req.user.id)) {
+    sendTo(u.id, { type: 'call', from: req.user.id, callId: cid, action: 'end' }); finishCall(cid, 'rejected');
+  }
+  afterBlockChange(req.user.id, u.id);
+  res.json({ ok: true });
+});
+app.delete('/api/blocks/:id', auth, (req, res) => {
+  db.prepare('DELETE FROM blocks WHERE user_id = ? AND blocked_id = ?').run(req.user.id, Number(req.params.id));
+  afterBlockChange(req.user.id, Number(req.params.id));
+  res.json({ ok: true });
+});
+
+/* ---------- Активные сеансы ---------- */
+function deviceName(ua) {
+  ua = String(ua || '');
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows'
+    : /Mac OS X|Macintosh/.test(ua) ? 'macOS' : /CrOS/.test(ua) ? 'ChromeOS' : /Linux/.test(ua) ? 'Linux' : '';
+  const br = /YaBrowser/.test(ua) ? 'Яндекс Браузер' : /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /SamsungBrowser/.test(ua) ? 'Samsung Internet'
+    : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : '';
+  return [br, os].filter(Boolean).join(', ') || 'Неизвестное устройство';
+}
+function kickSessions(userId, sessionIds) {
+  const set = online.get(userId);
+  if (!set) return;
+  for (const ws of [...set]) if (!sessionIds || sessionIds.includes(ws.sessionId)) {
+    try { ws.send(JSON.stringify({ type: 'loggedOut' })); } catch { /* закрыт */ }
+    ws.close();
+  }
+}
+app.get('/api/sessions', auth, (req, res) => {
+  const rows = db.prepare('SELECT rowid AS id, created_at, last_active, user_agent, ip FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_active DESC').all(req.user.id, now());
+  const live = new Set([...(online.get(req.user.id) || [])].map((ws) => ws.sessionId));
+  res.json({ sessions: rows.map((r) => ({ id: r.id, current: r.id === req.sessionId, online: live.has(r.id), device: deviceName(r.user_agent),
+    ip: r.ip, createdAt: r.created_at, lastActive: r.last_active })) });
+});
+app.delete('/api/sessions/:id', auth, (req, res) => {
+  const id = Number(req.params.id);
+  if (id === req.sessionId) return fail(res, 400, 'Чтобы завершить этот сеанс, нажмите «Выйти»');
+  const r = db.prepare('DELETE FROM sessions WHERE rowid = ? AND user_id = ?').run(id, req.user.id);
+  if (!r.changes) return fail(res, 404, 'Сеанс не найден');
+  kickSessions(req.user.id, [id]);
+  res.json({ ok: true });
+});
+app.post('/api/sessions/terminate-others', auth, (req, res) => {
+  const ids = db.prepare('SELECT rowid AS id FROM sessions WHERE user_id = ? AND rowid != ?').all(req.user.id, req.sessionId).map((r) => r.id);
+  db.prepare('DELETE FROM sessions WHERE user_id = ? AND rowid != ?').run(req.user.id, req.sessionId);
+  kickSessions(req.user.id, ids);
+  res.json({ ok: true, count: ids.length });
+});
+
+/* ---------- Жалобы и модерация ---------- */
+const ADMINS = (process.env.ADMINS || '').split(',').map((x) => x.trim().replace(/^@/, '').toLowerCase()).filter(Boolean);
+function isAdmin(u) {
+  if (!u) return false;
+  if (ADMINS.length) return ADMINS.includes(u.username.toLowerCase());
+  return u.id === db.prepare('SELECT MIN(id) AS id FROM users').get().id; // без настройки модератор — первый зарегистрированный
+}
+const REPORT_REASONS = ['Спам', 'Мошенничество', 'Оскорбления или травля', 'Насилие', 'Незаконный контент', 'Другое'];
+app.post('/api/reports', auth, json, (req, res) => {
+  if (rateLimited('report:' + req.user.id, 20, 3600000)) return fail(res, 429, 'Слишком много жалоб, попробуйте позже');
+  const kind = String(req.body?.kind || '');
+  const targetId = Number(req.body?.targetId);
+  const reason = REPORT_REASONS.includes(req.body?.reason) ? req.body.reason : null;
+  if (!reason) return fail(res, 400, 'Выберите причину');
+  let targetUser = null;
+  if (kind === 'user') { const u = q.userById.get(targetId); if (!u || u.id === req.user.id) return fail(res, 404, 'Пользователь не найден'); targetUser = u.id; }
+  else if (kind === 'message') {
+    const m = q.messageById.get(targetId);
+    if (!m || !q.isMember.get(m.chat_id, req.user.id) || m.sender_id === req.user.id) return fail(res, 404, 'Сообщение не найдено');
+    targetUser = m.sender_id;
+  } else if (kind === 'channel') { const c = cq.byId.get(targetId); if (!c) return fail(res, 404, 'Канал не найден'); targetUser = c.owner_id; }
+  else if (kind === 'post') { const p = cq.post.get(targetId); if (!p) return fail(res, 404, 'Публикация не найдена'); targetUser = p.author_id; }
+  else return fail(res, 400, 'Неизвестный тип жалобы');
+  const clean = (v, n) => String(v || '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim().slice(0, n);
+  db.prepare('INSERT INTO reports (reporter_id, kind, target_id, target_user_id, reason, comment, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(req.user.id, kind, targetId, targetUser, reason, clean(req.body?.comment, 1000), kind === 'message' ? clean(req.body?.evidence, 4000) : '', now());
+  if (req.body?.block && targetUser && targetUser !== req.user.id && (kind === 'user' || kind === 'message')) {
+    db.prepare('INSERT OR IGNORE INTO blocks (user_id, blocked_id, created_at) VALUES (?, ?, ?)').run(req.user.id, targetUser, now());
+    afterBlockChange(req.user.id, targetUser);
+  }
+  for (const a of db.prepare('SELECT * FROM users').all()) if (isAdmin(a) && a.id !== req.user.id) sendTo(a.id, { type: 'reports' });
+  res.json({ ok: true });
+});
+function adminOnly(req, res, next) { return isAdmin(req.user) ? next() : fail(res, 403, 'Только для модераторов'); }
+app.get('/api/admin/reports', auth, adminOnly, (req, res) => {
+  const status = req.query.status === 'closed' ? 'closed' : 'open';
+  const rows = db.prepare('SELECT * FROM reports WHERE status = ? ORDER BY id DESC LIMIT 200').all(status);
+  res.json({ reports: rows.map((r) => {
+    const reporter = q.userById.get(r.reporter_id), target = r.target_user_id ? q.userById.get(r.target_user_id) : null;
+    let channel = null, post = null;
+    if (r.kind === 'channel') { const c = cq.byId.get(r.target_id); channel = c ? { id: c.id, title: c.title, slug: c.slug } : null; }
+    if (r.kind === 'post') {
+      const p = cq.post.get(r.target_id);
+      const c = p && cq.byId.get(p.channel_id);
+      post = p ? { id: p.id, channelId: p.channel_id, text: String(JSON.parse(p.body).text || '').slice(0, 500) } : null;
+      channel = c ? { id: c.id, title: c.title, slug: c.slug } : null;
+    }
+    return { id: r.id, kind: r.kind, reason: r.reason, comment: r.comment, evidence: r.evidence, createdAt: r.created_at, status: r.status,
+      reporter: reporter ? publicUser(reporter) : null, target: target ? { ...publicUser(target), banned: !!target.banned } : null, channel, post,
+      sameTarget: db.prepare('SELECT COUNT(*) AS n FROM reports WHERE target_user_id = ?').get(r.target_user_id).n };
+  }), open: db.prepare("SELECT COUNT(*) AS n FROM reports WHERE status = 'open'").get().n });
+});
+function banUser(id, on) {
+  db.prepare('UPDATE users SET banned = ? WHERE id = ?').run(on ? 1 : 0, id);
+  if (on) { db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id); kickSessions(id); }
+}
+app.post('/api/admin/reports/:id', auth, adminOnly, json, (req, res) => {
+  const r = db.prepare('SELECT * FROM reports WHERE id = ?').get(Number(req.params.id));
+  if (!r) return fail(res, 404, 'Жалоба не найдена');
+  const action = String(req.body?.action || 'close');
+  if (action === 'ban') {
+    if (!r.target_user_id || isAdmin(q.userById.get(r.target_user_id))) return fail(res, 400, 'Этого пользователя нельзя заблокировать');
+    banUser(r.target_user_id, true);
+  } else if (action === 'deletePost' && r.kind === 'post') {
+    const p = cq.post.get(r.target_id);
+    if (p) { cq.delPost.run(p.id); chBroadcast(p.channel_id, { type: 'channelPostDeleted', channelId: p.channel_id, postId: p.id }); }
+  } else if (action === 'deleteChannel' && (r.kind === 'channel' || r.kind === 'post')) {
+    const c = cq.byId.get(r.kind === 'channel' ? r.target_id : cq.post.get(r.target_id)?.channel_id);
+    if (c) removeChannel(c);
+  } else if (action !== 'close') return fail(res, 400, 'Неизвестное действие');
+  // закрываем и все остальные открытые жалобы на ту же цель
+  db.prepare("UPDATE reports SET status = 'closed', handled_by = ?, handled_at = ? WHERE status = 'open' AND kind = ? AND target_id = ?").run(req.user.id, now(), r.kind, r.target_id);
+  if (action === 'ban') db.prepare("UPDATE reports SET status = 'closed', handled_by = ?, handled_at = ? WHERE status = 'open' AND target_user_id = ?").run(req.user.id, now(), r.target_user_id);
+  res.json({ ok: true });
+});
+app.get('/api/admin/banned', auth, adminOnly, (req, res) => {
+  res.json({ users: db.prepare('SELECT * FROM users WHERE banned = 1 ORDER BY id DESC').all().map(publicUser) });
+});
+app.post('/api/admin/unban', auth, adminOnly, json, (req, res) => { banUser(Number(req.body?.userId), false); res.json({ ok: true }); });
+
 /* ---------- Push-уведомления (Web Push, VAPID) ---------- */
 const webpush = require('web-push');
 const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
@@ -1093,7 +1271,7 @@ app.get('/api/calls', auth, (req, res) => {
   }) });
 });
 const liveCalls = new Map(); // callId -> {caller, callee}
-function callAllowed(a, b) { return a !== b && !!q.chatByDirectKey.get([a, b].sort((x, y) => x - y).join(':')); }
+function callAllowed(a, b) { return a !== b && !blockState(a, b) && !!q.chatByDirectKey.get([a, b].sort((x, y) => x - y).join(':')); }
 function finishCall(callId, status) {
   const c = db.prepare('SELECT * FROM calls WHERE id = ?').get(callId);
   liveCalls.delete(callId);
@@ -1257,12 +1435,15 @@ app.post('/api/channels/:id/leave', auth, (req, res) => {
 app.delete('/api/channels/:id', auth, (req, res) => {
   const c = chGet(req, res); if (!c) return;
   if (c.owner_id !== req.user.id) return fail(res, 403, 'Удалить канал может только владелец');
+  removeChannel(c);
+  res.json({ ok: true });
+});
+function removeChannel(c) {
   const subs = cq.subIds.all(c.id);
   for (const f of db.prepare('SELECT id FROM channel_files WHERE channel_id = ?').all(c.id)) { try { fs.unlinkSync(path.join(CH_FILES, f.id)); } catch { /* нет */ } }
   db.prepare('DELETE FROM channels WHERE id = ?').run(c.id);
   for (const { user_id } of subs) sendTo(user_id, { type: 'channelRemoved', channelId: c.id });
-  res.json({ ok: true });
-});
+}
 app.get('/api/channels/:id/posts', auth, (req, res) => {
   const c = chGet(req, res); if (!c) return;
   const before = Number(req.query.before) || Number.MAX_SAFE_INTEGER;
@@ -1485,6 +1666,7 @@ app.post('/api/gifts/send', auth, json, (req, res) => {
   if (!t) return fail(res, 400, 'Такого подарка нет');
   if (!to) return fail(res, 404, 'Пользователь не найден');
   if (to.id === req.user.id) return fail(res, 400, 'Себе подарок отправить нельзя');
+  if (blockState(req.user.id, to.id)) return fail(res, 403, 'Нельзя: пользователь заблокирован');
   let giftId, chatId, msgRow;
   try {
     db.transaction(() => {
@@ -1597,6 +1779,7 @@ server.on('upgrade', (req, socket, head) => {
   if (!user) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
   wss.handleUpgrade(req, socket, head, (ws) => {
     ws.userId = user.id;
+    ws.sessionId = user.session_id;
     ws.isAlive = true;
     if (!online.has(user.id)) { online.set(user.id, new Set()); announcePresence(user.id, true); }
     online.get(user.id).add(ws);

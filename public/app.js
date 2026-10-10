@@ -72,6 +72,9 @@
     arrowUp: '<path d="M7 17 17 7M8 7h9v9"/>',
     arrowDown: '<path d="M17 7 7 17M16 17H7V8"/>',
     chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>',
+    flag: '<path d="M5 21V4h11l-1.5 4L16 12H5"/>',
+    block: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
+    devices: '<rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M6 18h6"/><rect x="17" y="8" width="5" height="12" rx="1.2"/>',
     bookmark: '<path d="M6 3.5h12v17l-6-4.2-6 4.2Z"/>',
     at: '<circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>',
   };
@@ -665,6 +668,8 @@
     renderList();
     renderPane();
     loadChats().then(openFromLink);
+    loadBlocked();
+    api('/api/me').then((r) => { S.admin = !!r.admin; if (S.tab === 'profile') renderProfileTab(); }).catch(() => {});
     loadChannels();
     getCatalog().then(() => { renderList(); if (S.active) renderMessages(); }).catch(() => {});
     connect();
@@ -782,6 +787,7 @@
           row('shield', 'Конфиденциальность', 'Google, двухфакторная защита, ключ шифрования', openPrivacy),
           row('palette', 'Внешний вид', 'Тема, размер текста', openAppearance),
           row('database', 'Данные и хранилище', 'Кеш файлов на устройстве', openStorage)),
+        S.admin ? h('div', { class: 'card' }, row('flag', 'Модерация', 'Жалобы пользователей', () => openModeration())) : null,
         h('div', { class: 'card' }, row('help', 'Помощь', 'Как работает шифрование, частые вопросы', openHelp)),
         h('div', { class: 'card' }, row('logout', 'Выйти', null, logout, 'danger-row'))));
   }
@@ -1101,7 +1107,7 @@
     const down = h('button', { class: 'to-bottom', 'aria-label': 'К последним сообщениям', onclick: () => {
       msgs.scrollTo({ top: msgs.scrollHeight, behavior: 'smooth' });
     } }, icon('down', 24), downBadge);
-    const composer = buildComposer(chat);
+    const composer = chat.blocked ? blockedBar(chat) : buildComposer(chat);
     const pinBox = h('div');
     pane.append(head, pinBox, keyWarnBox, h('div', { class: 'msgs-wrap' }, msgs, down), composer.el);
     Object.assign(S.refs, { head, keyWarnBox, msgs, inner, typingRow, composer, down, downBadge, pinBox });
@@ -1111,7 +1117,15 @@
     renderHead();
     renderPinned();
     renderMessages('bottom');
-    if (!COARSE) composer.input.focus();
+    if (!COARSE) composer.input?.focus();
+  }
+  function blockedBar(chat) {
+    const o = other(chat);
+    const el = chat.blocked === 'me'
+      ? h('div', { class: 'blocked-bar' }, h('span', null, icon('block', 18), `Вы заблокировали ${o.displayName}`),
+        h('button', { class: 'btn ghost', onclick: () => setBlocked(o, false) }, 'Разблокировать'))
+      : h('div', { class: 'blocked-bar' }, h('span', null, icon('block', 18), 'Пользователь ограничил сообщения от вас'));
+    return { el, input: null, replyBox: h('div'), uploadBox: h('div'), syncBtn() {}, autosize() {} };
   }
 
   /* ---------- Страница контакта / группы ---------- */
@@ -1202,6 +1216,14 @@
           const close = modal('Общие группы', [h('div', { class: 'card' }, groups.map((g) => h('button', { class: 'card-row', onclick: () => { close(); openChat(g.id); } },
             avatar(g, 40), h('span', { class: 'grow' }, h('b', null, g.title), h('small', null, `${g.members.length} ${plural(g.members.length, 'участник', 'участника', 'участников')}`)))))]);
         })].filter(Boolean));
+      if (!isGroup && u.id !== S.me.id) {
+        body.querySelector('.pg-danger')?.remove();
+        const blocked = chat?.blocked === 'me' || S.blockedIds?.has(u.id);
+        const drow = (ic, label, fn) => h('button', { class: 'card-row danger-row', onclick: fn }, h('span', { class: 'ic' }, icon(ic, 19, 1.9)), h('span', { class: 'grow' }, h('b', null, label)));
+        body.append(h('div', { class: 'card pg-danger' },
+          drow('block', blocked ? 'Разблокировать' : 'Заблокировать', () => setBlocked(u, !blocked)),
+          drow('flag', 'Пожаловаться', () => openReport({ kind: 'user', targetId: u.id, user: u }))));
+      }
       if (isGroup) {
         body.querySelector('.pg-members')?.remove();
         body.append(h('div', { class: 'section pg-members' }, h('div', { class: 'section-title' }, 'Участники'),
@@ -1226,8 +1248,8 @@
       h('button', { class: 'head-av', 'aria-label': 'Профиль', onclick: () => openChatPage(chat) }, avatar(chat, 42)),
       h('button', { class: 'head-title', onclick: () => openChatPage(chat) },
         h('b', null, chatTitle(chat)), h('small', { class: st.cls }, st.cls === 'typing' ? dots() : null, st.text)),
-      chat.type === 'direct' && !saved ? h('button', { class: 'icon-btn', 'aria-label': 'Аудиозвонок', title: 'Аудиозвонок', onclick: () => startCall(other(chat), 'audio') }, icon('phone', 21, 1.8)) : null,
-      chat.type === 'direct' && !saved ? h('button', { class: 'icon-btn', 'aria-label': 'Видеозвонок', title: 'Видеозвонок', onclick: () => startCall(other(chat), 'video') }, icon('video', 22, 1.8)) : null,
+      chat.type === 'direct' && !saved && !chat.blocked ? h('button', { class: 'icon-btn', 'aria-label': 'Аудиозвонок', title: 'Аудиозвонок', onclick: () => startCall(other(chat), 'audio') }, icon('phone', 21, 1.8)) : null,
+      chat.type === 'direct' && !saved && !chat.blocked ? h('button', { class: 'icon-btn', 'aria-label': 'Видеозвонок', title: 'Видеозвонок', onclick: () => startCall(other(chat), 'video') }, icon('video', 22, 1.8)) : null,
       h('button', { class: 'icon-btn' + (chat.type === 'direct' && !saved ? ' hide-sm' : ''), 'aria-label': 'Поиск по сообщениям', title: 'Поиск', onclick: openSearch }, icon('search', 22, 1.8)),
       saved ? null : h('button', { class: 'icon-btn hide-sm', 'aria-label': 'Код безопасности', title: 'Код безопасности', onclick: () => openInfo(chat.id) }, icon('shield', 22, 1.8)),
       saved ? null : h('button', { class: 'icon-btn', 'aria-label': chat.type === 'group' ? 'О группе' : 'Профиль собеседника', onclick: () => openChatPage(chat) }, icon('more', 22))].filter(Boolean));
@@ -1386,6 +1408,7 @@
         chat.pinned?.id === m.id ? ['pin', 'Открепить', () => pinMessage(chat, null)] : ['pin', 'Закрепить', () => pinMessage(chat, m)],
         mine && p.t === 'text' && ['edit', 'Изменить', () => setEdit(m, p)],
         mine && ['trash', 'Удалить у всех', () => deleteMessage(m, p), 'danger'],
+        !mine && ['flag', 'Пожаловаться', () => openReport({ kind: 'message', targetId: m.id, user: sender, evidence: reportText(p) }), 'danger'],
       ].filter(Boolean);
       items.reactions = { list: S.config.reactions || ['👍', '❤️', '😂', '😮', '😢', '🔥'], pick: (e) => react(m, e),
         mine: m.reactions?.find((r) => r.users.includes(S.me.id))?.emoji };
@@ -1753,7 +1776,7 @@
 
   function setReply(m, p, name) {
     const c = S.refs.composer;
-    if (!c) return;
+    if (!c || !c.input) return;
     clear(c.replyBox);
     if (S.edit && m) { S.edit = null; c.input.value = ''; c.autosize(); }
     if (!m) { S.reply = null; c.syncBtn(); return; }
@@ -1768,7 +1791,7 @@
   /* Правка своего сообщения */
   function setEdit(m, p) {
     const c = S.refs.composer;
-    if (!c) return;
+    if (!c || !c.input) return;
     clear(c.replyBox);
     S.reply = null;
     if (!m) { S.edit = null; c.input.value = getDraft(S.active); c.autosize(); c.syncBtn(); return; }
@@ -1831,7 +1854,7 @@
 
   function renderUploads() {
     const c = S.refs.composer;
-    if (!c) return;
+    if (!c || !c.input) return;
     clear(c.uploadBox);
     if (S.uploads) c.uploadBox.append(h('div', { class: 'upload-bar' }, `Шифрую и отправляю ${S.uploads} ${plural(S.uploads, 'файл', 'файла', 'файлов')}…`));
   }
@@ -1987,6 +2010,7 @@
       if (d.chat.lastMessage) await decryptMsg(d.chat.lastMessage, d.chat);
       if (old && S.active === d.chat.id) { d.chat.unread = 0; }
       if (old && old.members.length !== d.chat.members.length) S.userKeys.clear();
+      if (S.active === d.chat.id && old && (old.blocked || null) !== (d.chat.blocked || null)) { renderList(); renderPane(); return; }
       if (S.active === d.chat.id) {
         renderPinned();
         const box = S.msgs.get(d.chat.id);
@@ -1997,6 +2021,9 @@
       return;
     }
     if (d.type === 'messageUpdated') return applyUpdated(d.message);
+    if (d.type === 'loggedOut') { S.ws = null; toast('Сеанс завершён на другом устройстве'); setTimeout(() => location.reload(), 1200); return; }
+    if (d.type === 'reports') { if (S.admin) { toast('Новая жалоба'); if (S.tab === 'profile') renderProfileTab(); } return; }
+    if (d.type === 'blocks') return;
     if (d.type === 'call') return onCallSignal(d);
     if (d.type === 'callsChanged') { if (S.tab === 'calls') renderCalls(); return; }
     if (d.type === 'channelPost') {
@@ -2368,6 +2395,11 @@
       h('span', { class: 'chip-status' + (info.twoFactor ? ' on' : '') }, info.twoFactor ? 'Включено' : 'Выключено'));
     const close = modal('Конфиденциальность', [
       h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Вход'), h('div', { class: 'card' }, gRow, tfaRow)),
+      h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Доступ'), h('div', { class: 'card' },
+        h('button', { class: 'card-row', onclick: () => { close(); openSessions(); } }, h('span', { class: 'ic' }, icon('devices', 19, 1.9)),
+          h('span', { class: 'grow' }, h('b', null, 'Активные сеансы'), h('small', null, 'Где выполнен вход, выйти на других устройствах')), h('span', { class: 'chev' }, icon('chevron', 18))),
+        h('button', { class: 'card-row', onclick: () => { close(); openBlocked(); } }, h('span', { class: 'ic' }, icon('block', 19, 1.9)),
+          h('span', { class: 'grow' }, h('b', null, 'Заблокированные'), h('small', null, 'Не могут писать и звонить вам')), h('span', { class: 'chev' }, icon('chevron', 18))))),
       h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Сообщения'),
         h('div', { class: 'card' }, settingsSw('tiho-link-preview', 'Предпросмотр ссылок', 'Карточку собирает ваш браузер через сервер «Тихо», собеседники ничего не загружают', 'link', null, true))),
       h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Шифрование'),
@@ -2849,6 +2881,7 @@
       ['link', 'Ссылка на канал', () => copyText(`${location.origin}/c/${c.slug}`)],
       canPostIn(c) && p.body.text !== undefined && ['edit', 'Изменить', () => editPost(c, p)],
       canPostIn(c) && ['trash', 'Удалить', () => deletePost(c, p), 'danger'],
+      !canPostIn(c) && ['flag', 'Пожаловаться', () => openReport({ kind: 'post', targetId: p.id, title: c.title }), 'danger'],
     ].filter(Boolean);
     if (c.subscribed) items.reactions = { list: S.config.reactions || ['👍'], pick: (e) => reactPost(c, p, e), mine: p.reactions.find((x) => x.mine)?.emoji };
     card.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, items, card); });
@@ -2969,6 +3002,7 @@
     } else {
       body.push(h('button', { class: 'btn block big', onclick: () => { close(); joinChannel(c); } }, 'Подписаться'));
     }
+    if (c.role !== 'owner') body.push(h('button', { class: 'btn ghost block danger-text', onclick: () => { close(); openReport({ kind: 'channel', targetId: c.id, title: c.title }); } }, icon('flag', 18), 'Пожаловаться на канал'));
     body.push(h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Публикации канала видят все подписчики. В отличие от личных чатов и групп, они не шифруются сквозным шифрованием.'));
     const close = modal('Канал', body);
   }
@@ -3532,6 +3566,136 @@
   }
 
   /* ================= ЗАПУСК ================= */
+  /* ================= СЕАНСЫ, БЛОКИРОВКА, ЖАЛОБЫ ================= */
+  const agoText = (ts) => {
+    const d = Date.now() - ts;
+    if (d < 5 * 60000) return 'только что';
+    if (d < 3600000) { const m = Math.floor(d / 60000); return `${m} ${plural(m, 'минуту', 'минуты', 'минут')} назад`; }
+    if (sameDay(ts, Date.now())) return 'сегодня в ' + hm(ts);
+    if (sameDay(ts, Date.now() - 86400000)) return 'вчера в ' + hm(ts);
+    return new Date(ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+  };
+  const devIcon = (name) => /Android|iPhone/.test(name) ? 'phone' : 'devices';
+  async function openSessions() {
+    let list;
+    try { ({ sessions: list } = await api('/api/sessions')); } catch (e) { return toast(e.message); }
+    const cur = list.find((x) => x.current);
+    const others = list.filter((x) => !x.current);
+    const srow = (x) => h(x.current ? 'div' : 'button', { class: 'card-row session-row', onclick: x.current ? null : async () => {
+      if (!confirm(`Завершить сеанс «${x.device}»? На том устройстве придётся войти заново.`)) return;
+      try { await api('/api/sessions/' + x.id, { method: 'DELETE' }); close(); openSessions(); toast('Сеанс завершён'); } catch (e) { toast(e.message); }
+    } }, h('span', { class: 'ic' }, icon(devIcon(x.device), 19, 1.9)),
+    h('span', { class: 'grow' }, h('b', null, x.device), h('small', null, [x.ip, x.current ? 'это устройство' : x.online ? 'в сети' : agoText(x.lastActive)].filter(Boolean).join(' · '))),
+    x.current ? h('span', { class: 'chip-status on' }, 'Сейчас') : h('span', { class: 'chev' }, icon('close', 18)));
+    const close = modal('Активные сеансы', [
+      h('div', { class: 'section-title' }, 'Это устройство'), h('div', { class: 'card' }, cur ? srow(cur) : null),
+      others.length ? h('button', { class: 'btn danger block', onclick: async () => {
+        if (!confirm('Выйти на всех других устройствах?')) return;
+        try { const r = await api('/api/sessions/terminate-others', { method: 'POST' }); close(); toast(`Завершено сеансов: ${r.count}`); } catch (e) { toast(e.message); }
+      } }, icon('logout', 18), 'Завершить другие сеансы') : null,
+      h('div', { class: 'section-title' }, others.length ? `Другие устройства · ${others.length}` : 'Других устройств нет'),
+      others.length ? h('div', { class: 'card' }, others.map(srow)) : null,
+      h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Если видите незнакомое устройство — завершите его сеанс и смените пароль. Сеанс без входа завершается сам через 60 дней.'),
+    ].filter(Boolean));
+  }
+  async function loadBlocked() {
+    try { const { users } = await api('/api/blocks'); S.blockedIds = new Set(users.map((u) => u.id)); return users; } catch { return []; }
+  }
+  async function setBlocked(u, on) {
+    if (on && !confirm(`Заблокировать ${u.displayName}? Он не сможет писать, звонить и дарить вам подарки.`)) return;
+    try {
+      if (on) await api('/api/blocks', { body: { userId: u.id } }); else await api('/api/blocks/' + u.id, { method: 'DELETE' });
+      await loadBlocked();
+      const c = directWith(u.id);
+      if (c) c.blocked = on ? 'me' : null;
+      toast(on ? 'Пользователь заблокирован' : 'Пользователь разблокирован');
+      renderPane();
+    } catch (e) { toast(e.message); }
+  }
+  async function openBlocked() {
+    const users = await loadBlocked();
+    const close = modal('Заблокированные', [
+      users.length ? h('div', { class: 'card' }, users.map((u) => h('div', { class: 'card-row' }, userAvatar(u, 40),
+        h('span', { class: 'grow' }, h('b', null, u.displayName), h('small', null, '@' + u.username)),
+        h('button', { class: 'btn ghost', style: 'height:34px;padding:0 12px;font-size:13px', onclick: async () => { close(); await setBlocked(u, false); } }, 'Разблокировать'))))
+        : h('div', { class: 'list-empty' }, 'Вы никого не блокировали. Заблокировать можно в профиле собеседника.'),
+    ]);
+  }
+  const reportText = (p) => p.t === 'text' ? p.text : p.t === 'file' ? `[${p.mime.startsWith('image/') ? 'фото' : 'файл'}: ${p.name}] ${p.caption || ''}` : p.t === 'poll' ? `[опрос] ${p.question}` : p.t === 'sticker' ? '[стикер]' : '';
+  const REASONS = ['Спам', 'Мошенничество', 'Оскорбления или травля', 'Насилие', 'Незаконный контент', 'Другое'];
+  function openReport(t) {
+    let reason = '';
+    const go = h('button', { class: 'btn danger block', disabled: true }, 'Отправить жалобу');
+    const reasons = h('div', { class: 'card' }, REASONS.map((r) => {
+      const b = h('button', { class: 'card-row', role: 'radio', 'aria-checked': 'false', onclick: () => {
+        reason = r; reasons.querySelectorAll('[role=radio]').forEach((x) => { x.setAttribute('aria-checked', String(x === b)); x.querySelector('.check').classList.toggle('on', x === b); });
+        go.disabled = false;
+      } }, h('span', { class: 'grow' }, h('b', null, r)), h('span', { class: 'check' }));
+      return b;
+    }));
+    const comment = h('textarea', { class: 'input', rows: 3, maxlength: 1000, placeholder: 'Что случилось? (необязательно)' });
+    const attach = t.kind === 'message' && t.evidence ? h('button', { class: 'sw', role: 'switch', 'aria-checked': 'true', 'aria-label': 'Приложить текст сообщения',
+      onclick: () => attach.setAttribute('aria-checked', String(attach.getAttribute('aria-checked') !== 'true')) }) : null;
+    const canBlock = (t.kind === 'user' || t.kind === 'message') && t.user && t.user.id !== S.me.id;
+    const blockSw = canBlock ? h('button', { class: 'sw', role: 'switch', 'aria-checked': 'false', 'aria-label': 'Заблокировать',
+      onclick: () => blockSw.setAttribute('aria-checked', String(blockSw.getAttribute('aria-checked') !== 'true')) }) : null;
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      const block = blockSw?.getAttribute('aria-checked') === 'true';
+      try {
+        await api('/api/reports', { body: { kind: t.kind, targetId: t.targetId, reason, comment: comment.value, block,
+          evidence: attach?.getAttribute('aria-checked') === 'true' ? t.evidence.slice(0, 4000) : '' } });
+        close(); toast('Жалоба отправлена модератору');
+        if (block) { await loadBlocked(); loadChats(); }
+      } catch (e) { toast(e.message); go.disabled = false; }
+    });
+    const what = { user: `на ${t.user?.displayName || 'пользователя'}`, message: 'на сообщение', channel: `на канал «${t.title}»`, post: `на публикацию в «${t.title}»` }[t.kind];
+    const close = modal('Жалоба ' + what, [
+      h('div', { class: 'section-title' }, 'Причина'), reasons,
+      h('label', { class: 'field-label' }, 'Подробности', comment),
+      attach || blockSw ? h('div', { class: 'card' },
+        attach ? h('div', { class: 'card-row' }, h('span', { class: 'grow' }, h('b', null, 'Приложить текст сообщения'),
+          h('small', null, 'Сообщения зашифрованы — модератор увидит текст, только если вы его приложите')), attach) : null,
+        blockSw ? h('div', { class: 'card-row' }, h('span', { class: 'grow' }, h('b', null, `Заблокировать ${t.user.displayName}`), h('small', null, 'Не сможет писать и звонить вам')), blockSw) : null) : null,
+      go,
+    ].filter(Boolean));
+  }
+  async function openModeration(status = 'open') {
+    let data;
+    try { data = await api('/api/admin/reports?status=' + status); } catch (e) { return toast(e.message); }
+    const act = async (r, action, ask) => {
+      if (ask && !confirm(ask)) return;
+      try { await api('/api/admin/reports/' + r.id, { body: { action } }); close(); openModeration(status); toast('Готово'); } catch (e) { toast(e.message); }
+    };
+    const kindText = { user: 'Пользователь', message: 'Сообщение', channel: 'Канал', post: 'Публикация' };
+    const card = (r) => h('div', { class: 'card report' },
+      h('div', { class: 'report-head' }, h('span', { class: 'chip-status' }, kindText[r.kind]), h('b', null, r.reason), h('small', { class: 'muted' }, shortTime(r.createdAt))),
+      r.target ? h('div', { class: 'report-line' }, userAvatar(r.target, 28), h('span', null, `${r.target.displayName} @${r.target.username}`),
+        r.target.banned ? h('span', { class: 'chip-status' }, 'заблокирован') : null, r.sameTarget > 1 ? h('small', { class: 'muted' }, `жалоб: ${r.sameTarget}`) : null) : null,
+      r.channel ? h('div', { class: 'report-line' }, icon('megaphone', 16), `«${r.channel.title}» @${r.channel.slug}`) : null,
+      r.post?.text ? h('blockquote', null, r.post.text) : null,
+      r.evidence ? h('blockquote', null, r.evidence) : null,
+      r.comment ? h('p', { class: 'report-comment' }, '💬 ', r.comment) : null,
+      h('small', { class: 'muted' }, `От: ${r.reporter ? r.reporter.displayName + ' @' + r.reporter.username : '—'}`),
+      status === 'open' ? h('div', { class: 'report-actions' },
+        h('button', { class: 'btn ghost', onclick: () => act(r, 'close') }, 'Отклонить'),
+        r.kind === 'post' ? h('button', { class: 'btn ghost', onclick: () => act(r, 'deletePost', 'Удалить публикацию?') }, 'Удалить пост') : null,
+        r.kind === 'channel' || r.kind === 'post' ? h('button', { class: 'btn ghost', onclick: () => act(r, 'deleteChannel', 'Удалить канал целиком?') }, 'Удалить канал') : null,
+        r.target && !r.target.banned ? h('button', { class: 'btn danger', onclick: () => act(r, 'ban', `Заблокировать аккаунт @${r.target.username}? Он не сможет войти.`) }, 'Бан') : null) : null);
+    const seg = h('div', { class: 'theme-seg' }, [['open', 'Новые'], ['closed', 'Закрытые']].map(([k, l]) =>
+      h('button', { 'aria-pressed': String(k === status), onclick: () => { if (k !== status) { close(); openModeration(k); } } }, l)));
+    const close = modal('Модерация', [seg,
+      data.reports.length ? h('div', { class: 'report-list' }, data.reports.map(card)) : h('div', { class: 'list-empty' }, status === 'open' ? 'Новых жалоб нет' : 'Пусто'),
+      h('button', { class: 'btn ghost block', onclick: async () => {
+        const { users } = await api('/api/admin/banned');
+        const c2 = modal('Заблокированные аккаунты', [users.length ? h('div', { class: 'card' }, users.map((u) => h('div', { class: 'card-row' }, userAvatar(u, 36),
+          h('span', { class: 'grow' }, h('b', null, u.displayName), h('small', null, '@' + u.username)),
+          h('button', { class: 'btn ghost', style: 'height:34px;padding:0 12px;font-size:13px', onclick: async () => { await api('/api/admin/unban', { body: { userId: u.id } }); c2(); toast('Разбанен'); } }, 'Разбанить'))))
+          : h('div', { class: 'list-empty' }, 'Никто не заблокирован')]);
+      } }, icon('block', 18), 'Заблокированные аккаунты'),
+    ]);
+  }
+
   async function boot() {
     applyTheme();
     if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(() => {});
@@ -3550,6 +3714,7 @@
       return;
     }
     S.me = me.user;
+    S.admin = !!me.admin;
     const saved = await C.loadKey(me.user.id).catch(() => null);
     if (saved && saved.publicKey === me.publicKey) {
       Object.assign(S, { priv: saved.privateKey, pub: saved.publicKey });
