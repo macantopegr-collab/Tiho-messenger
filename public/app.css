@@ -908,3 +908,29 @@ mark{background:#FFD34D;color:#141413;border-radius:3px;padding:0 1px}
 .invite-link{display:flex;align-items:center;gap:4px}
 .invite-link code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--accent)}
 .pg-actions{flex-wrap:wrap}
+
+/* ---------- v17: ветки и комментарии ---------- */
+.thread-btn{display:flex;align-items:center;gap:8px;margin:6px 0 2px;padding:6px 10px;border:0;border-radius:10px;background:var(--quote-in);color:var(--accent);font:600 13px/1 inherit;cursor:pointer;width:100%;text-align:left}
+.out .thread-btn{background:var(--out-quote);color:inherit}
+.thread-btn .muted{font-weight:400;margin-left:auto}
+.thread-avs{display:flex}
+.thread-avs .av{width:20px!important;height:20px!important;font-size:9px!important;border:1.5px solid var(--surface);margin-left:-6px}
+.thread-avs .av:first-child{margin-left:0}
+.thread-panel{position:absolute;inset:0;z-index:30;display:flex;flex-direction:column;background:var(--chat-bg)}
+.thread-panel .head-title{display:flex;flex-direction:column;min-width:0}
+.thread-panel .head-title small{color:var(--muted);font-size:13px}
+.thread-msgs{flex:1}
+.post-comments{display:flex;align-items:center;gap:8px;width:100%;padding:10px 2px 4px;margin-top:8px;border:0;border-top:1px solid var(--border);background:none;color:var(--accent);font:600 14px/1 inherit;cursor:pointer;text-align:left}
+.post-comments .chev{margin-left:auto;color:var(--muted)}
+.comment-list{display:flex;flex-direction:column;gap:12px;max-height:52vh;overflow:auto;padding:2px}
+.comment{display:flex;gap:10px;align-items:flex-start}
+.comment .av{width:34px;height:34px;font-size:13px}
+.comment-body{flex:1;min-width:0;background:var(--quote-in);border-radius:4px 14px 14px 14px;padding:8px 12px}
+.comment-head{display:flex;align-items:baseline;gap:8px}
+.comment-head b{font-size:13px;color:var(--accent)}
+.comment-text{font-size:14px;line-height:1.4;white-space:pre-wrap;word-break:break-word}
+.comment-input{display:flex;gap:8px;align-items:center}
+.comment-input .input{flex:1}
+.comment-input .send{width:44px;height:44px;flex:none}
+.comment-post{margin:0;padding:8px 12px;border-left:3px solid var(--accent);background:var(--quote-in);border-radius:4px 10px 10px 4px;font-size:13px;color:var(--text-2);max-height:90px;overflow:hidden}
+.thread-panel .composer{width:100%;box-sizing:border-box}

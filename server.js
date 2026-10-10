@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS files (
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google ON users(google_sub) WHERE google_sub IS NOT NULL');
   const mcols = new Set(db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name));
   if (!mcols.has('edited_at')) db.exec('ALTER TABLE messages ADD COLUMN edited_at INTEGER');
+  if (!mcols.has('thread_id')) db.exec('ALTER TABLE messages ADD COLUMN thread_id INTEGER');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, id)');
   const ccols = new Set(db.prepare('PRAGMA table_info(chats)').all().map((c) => c.name));
   if (!ccols.has('pinned_id')) db.exec('ALTER TABLE chats ADD COLUMN pinned_id INTEGER');
   const mbcols = new Set(db.prepare('PRAGMA table_info(members)').all().map((c) => c.name));
@@ -194,15 +196,15 @@ const q = {
   memberIds: db.prepare('SELECT user_id FROM members WHERE chat_id = ?'),
   myChats: db.prepare(`SELECT c.*, m.last_read_id, m.archived, m.muted_until,
                          (SELECT COUNT(*) FROM scheduled sc WHERE sc.chat_id = c.id AND sc.sender_id = m.user_id) AS scheduled_count,
-                         (SELECT MAX(id) FROM messages WHERE chat_id = c.id) AS last_id,
-                         (SELECT COUNT(*) FROM messages WHERE chat_id = c.id AND id > m.last_read_id
+                         (SELECT MAX(id) FROM messages WHERE chat_id = c.id AND thread_id IS NULL) AS last_id,
+                         (SELECT COUNT(*) FROM messages WHERE chat_id = c.id AND id > m.last_read_id AND thread_id IS NULL
                             AND (sender_id IS NULL OR sender_id != m.user_id)) AS unread,
                          (SELECT COUNT(*) FROM mentions mn JOIN messages mm ON mm.id = mn.message_id
                             WHERE mn.chat_id = c.id AND mn.user_id = m.user_id AND mn.message_id > m.last_read_id AND mm.kind = 'msg') AS mentions
                        FROM members m JOIN chats c ON c.id = m.chat_id WHERE m.user_id = ?`),
   messageById: db.prepare('SELECT * FROM messages WHERE id = ?'),
   insertMessage: db.prepare('INSERT INTO messages (chat_id, sender_id, kind, body, created_at) VALUES (?, ?, ?, ?, ?)'),
-  messagesBefore: db.prepare('SELECT * FROM messages WHERE chat_id = ? AND id < ? ORDER BY id DESC LIMIT ?'),
+  messagesBefore: db.prepare('SELECT * FROM messages WHERE chat_id = ? AND id < ? AND thread_id IS NULL ORDER BY id DESC LIMIT ?'),
   setRead: db.prepare('UPDATE members SET last_read_id = MAX(last_read_id, ?) WHERE chat_id = ? AND user_id = ?'),
   insertFile: db.prepare('INSERT INTO files (id, chat_id, uploader_id, size, created_at) VALUES (?, ?, ?, ?, ?)'),
   fileById: db.prepare('SELECT * FROM files WHERE id = ?'),
@@ -331,7 +333,17 @@ function pollVotes(messageId) {
   for (const r of db.prepare('SELECT option, user_id FROM poll_votes WHERE message_id = ? ORDER BY rowid').all(messageId)) (out[r.option] ||= []).push(r.user_id);
   return out;
 }
-const messageView = (m, reactions) => ({
+function threadInfo(ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  for (const r of db.prepare(`SELECT thread_id, COUNT(*) AS n, MAX(created_at) AS last FROM messages WHERE thread_id IN (${ids.map(() => '?').join(',')}) AND kind != 'deleted' GROUP BY thread_id`).all(...ids)) {
+    const who = db.prepare('SELECT DISTINCT sender_id FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT 3').all(r.thread_id).map((x) => x.sender_id);
+    out.set(r.thread_id, { count: r.n, last: r.last, users: who });
+  }
+  return out;
+}
+const messageView = (m, reactions, thread) => ({
+  threadId: m.thread_id || null, thread: thread || undefined,
   id: m.id, chatId: m.chat_id, senderId: m.sender_id, kind: m.kind,
   body: JSON.parse(m.body), createdAt: m.created_at, editedAt: m.edited_at || null,
   reactions: reactionList(reactions), votes: pollVotes(m.id),
@@ -903,7 +915,17 @@ app.get('/api/chats/:id/messages', auth, (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 50, 100);
   const rows = q.messagesBefore.all(chat.id, before, limit).reverse();
   const rx = reactionsFor(rows.map((r) => r.id));
-  res.json({ messages: rows.map((r) => messageView(r, rx.get(r.id))) });
+  const th = threadInfo(rows.map((r) => r.id));
+  res.json({ messages: rows.map((r) => messageView(r, rx.get(r.id), th.get(r.id))) });
+});
+/* Ветка ответов к сообщению группы */
+app.get('/api/chats/:id/threads/:root', auth, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  const root = q.messageById.get(Number(req.params.root));
+  if (!root || root.chat_id !== chat.id || root.thread_id) return fail(res, 404, 'Сообщение не найдено');
+  const rows = db.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY id LIMIT 500').all(root.id);
+  const rx = reactionsFor([root.id, ...rows.map((r) => r.id)]);
+  res.json({ root: messageView(root, rx.get(root.id), threadInfo([root.id]).get(root.id)), messages: rows.map((r) => messageView(r, rx.get(r.id))) });
 });
 
 function validEnvelope(e) {
@@ -923,7 +945,13 @@ app.post('/api/chats/:id/messages', auth, json, (req, res) => {
     if (st === 'me') return fail(res, 403, 'Вы заблокировали этого пользователя');
     if (st === 'them') return fail(res, 403, 'Пользователь ограничил сообщения от вас');
   }
-  const sendAt = Number(req.body.sendAt) || 0;
+  let threadId = null;
+  if (req.body.threadId) {
+    const root = q.messageById.get(Number(req.body.threadId));
+    if (chat.type !== 'group' || !root || root.chat_id !== chat.id || root.thread_id || !['msg', 'gift'].includes(root.kind)) return fail(res, 400, 'Ветка не найдена');
+    threadId = root.id;
+  }
+  const sendAt = threadId ? 0 : Number(req.body.sendAt) || 0;
   if (sendAt > now() + 5000) {
     if (sendAt > now() + 366 * 86400000) return fail(res, 400, 'Можно запланировать не больше чем на год вперёд');
     if (db.prepare('SELECT COUNT(*) AS n FROM scheduled WHERE sender_id = ?').get(req.user.id).n >= 100) return fail(res, 400, 'Слишком много отложенных сообщений');
@@ -932,12 +960,13 @@ app.post('/api/chats/:id/messages', auth, json, (req, res) => {
     sendTo(req.user.id, { type: 'scheduled', chatId: chat.id });
     return res.json({ scheduled: { id, sendAt } });
   }
-  res.json({ message: deliverMessage(chat.id, req.user.id, env, req.body.mentions, req.body.clientId) });
+  res.json({ message: deliverMessage(chat.id, req.user.id, env, req.body.mentions, req.body.clientId, threadId) });
 });
 /* Доставка сообщения: сохранить, разослать, отметить упоминания, отправить push */
-function deliverMessage(chatId, senderId, env, mentions, clientId) {
+function deliverMessage(chatId, senderId, env, mentions, clientId, threadId = null) {
   const info = q.insertMessage.run(chatId, senderId, 'msg', JSON.stringify(env), now());
-  q.setRead.run(info.lastInsertRowid, chatId, senderId);
+  if (threadId) db.prepare('UPDATE messages SET thread_id = ? WHERE id = ?').run(threadId, info.lastInsertRowid);
+  else q.setRead.run(info.lastInsertRowid, chatId, senderId);
   /* Упоминания: текст зашифрован, поэтому клиент сам сообщает, кого отметил (только участников чата) */
   const mentioned = new Set();
   if (Array.isArray(mentions)) {
@@ -947,6 +976,15 @@ function deliverMessage(chatId, senderId, env, mentions, clientId) {
     for (const id of mentioned) db.prepare('INSERT OR IGNORE INTO mentions (message_id, chat_id, user_id) VALUES (?, ?, ?)').run(info.lastInsertRowid, chatId, id);
   }
   const msg = messageView(q.messageById.get(info.lastInsertRowid));
+  if (threadId) {
+    const th = threadInfo([threadId]).get(threadId);
+    for (const { user_id } of q.memberIds.all(chatId)) sendTo(user_id, { type: 'message', message: msg, clientId, thread: th, mentioned: mentioned.has(user_id) || undefined });
+    // в ветке уведомляем автора исходного сообщения и тех, кто уже отвечал
+    const people = new Set([q.messageById.get(threadId).sender_id, ...db.prepare('SELECT DISTINCT sender_id FROM messages WHERE thread_id = ?').all(threadId).map((r) => r.sender_id), ...mentioned]);
+    const chat = q.chatById.get(chatId), sender = q.userById.get(senderId);
+    for (const uid of people) if (uid && uid !== senderId && q.isMember.get(chatId, uid)) pushTo(uid, { title: chat.title, body: `${sender.display_name} ответил(а) в ветке`, tag: 'chat-' + chatId, url: '/', chatId });
+    return msg;
+  }
   for (const { user_id } of q.memberIds.all(chatId)) sendTo(user_id, { type: 'message', message: msg, clientId, mentioned: mentioned.has(user_id) || undefined });
   pushMessage(chatId, senderId, 'Новое сообщение', mentioned);
   return msg;
@@ -1693,7 +1731,11 @@ CREATE TABLE IF NOT EXISTS channel_posts (
 CREATE INDEX IF NOT EXISTS idx_cposts ON channel_posts(channel_id, id);
 CREATE TABLE IF NOT EXISTS channel_views (post_id INTEGER NOT NULL REFERENCES channel_posts(id) ON DELETE CASCADE, user_id INTEGER NOT NULL, PRIMARY KEY (post_id, user_id));
 CREATE TABLE IF NOT EXISTS channel_reactions (post_id INTEGER NOT NULL REFERENCES channel_posts(id) ON DELETE CASCADE, user_id INTEGER NOT NULL, emoji TEXT NOT NULL, PRIMARY KEY (post_id, user_id));
-CREATE TABLE IF NOT EXISTS channel_files (id TEXT PRIMARY KEY, channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE, mime TEXT NOT NULL, size INTEGER NOT NULL);`);
+CREATE TABLE IF NOT EXISTS channel_files (id TEXT PRIMARY KEY, channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE, mime TEXT NOT NULL, size INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS channel_comments (id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL REFERENCES channel_posts(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_ccomments_post ON channel_comments(post_id, id);`);
+if (!new Set(db.prepare('PRAGMA table_info(channels)').all().map((c) => c.name)).has('no_comments')) db.exec('ALTER TABLE channels ADD COLUMN no_comments INTEGER NOT NULL DEFAULT 0');
 const cq = {
   byId: db.prepare('SELECT * FROM channels WHERE id = ?'),
   bySlug: db.prepare('SELECT * FROM channels WHERE slug = ?'),
@@ -1726,14 +1768,15 @@ function postView(p, userId) {
   for (const r of rx) { if (!map.has(r.emoji)) map.set(r.emoji, []); map.get(r.emoji).push(r.user_id); }
   return { id: p.id, channelId: p.channel_id, author: author ? { id: author.id, displayName: author.display_name } : null,
     body: JSON.parse(p.body), createdAt: p.created_at, editedAt: p.edited_at || null, views: cq.views.get(p.id).n,
-    reactions: [...map].map(([emoji, users]) => ({ emoji, count: users.length, mine: users.includes(userId) })) };
+    reactions: [...map].map(([emoji, users]) => ({ emoji, count: users.length, mine: users.includes(userId) })),
+    comments: db.prepare('SELECT COUNT(*) AS n FROM channel_comments WHERE post_id = ?').get(p.id).n };
 }
 function channelView(c, userId) {
   const sub = cq.sub.get(c.id, userId);
   const lastId = c.last_id ?? db.prepare('SELECT MAX(id) AS m FROM channel_posts WHERE channel_id = ?').get(c.id).m;
   const last = lastId ? cq.post.get(lastId) : null;
   return { id: c.id, slug: c.slug, title: c.title, about: c.about, color: c.color, createdAt: c.created_at,
-    subscribers: cq.subCount.get(c.id).n, role: sub?.role || null, subscribed: !!sub,
+    subscribers: cq.subCount.get(c.id).n, role: sub?.role || null, subscribed: !!sub, comments: !c.no_comments,
     unread: c.unread ?? 0, lastPost: last ? postView(last, userId) : null };
 }
 function canPost(channelId, userId) { const s = cq.sub.get(channelId, userId); return s && (s.role === 'owner' || s.role === 'admin'); }
@@ -1780,6 +1823,7 @@ app.patch('/api/channels/:id', auth, json, (req, res) => {
   const about = req.body?.about !== undefined ? String(req.body.about).slice(0, 400).trim() : c.about;
   if (!title) return fail(res, 400, 'Название не может быть пустым');
   db.prepare('UPDATE channels SET title = ?, about = ? WHERE id = ?').run(title, about, c.id);
+  if (req.body?.comments !== undefined) db.prepare('UPDATE channels SET no_comments = ? WHERE id = ?').run(req.body.comments ? 0 : 1, c.id);
   const v = channelView(cq.byId.get(c.id), req.user.id);
   chBroadcast(c.id, { type: 'channel', channelId: c.id });
   res.json({ channel: v });
@@ -1850,6 +1894,37 @@ app.delete('/api/channels/:id/posts/:pid', auth, (req, res) => {
   chBroadcast(c.id, { type: 'channelPostDeleted', channelId: c.id, postId: p.id });
   res.json({ ok: true });
 });
+/* Комментарии к публикациям (каналы не шифруются, комментарии тоже) */
+app.get('/api/channels/:id/posts/:pid/comments', auth, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  const p = cq.post.get(Number(req.params.pid));
+  if (!p || p.channel_id !== c.id) return fail(res, 404, 'Публикация не найдена');
+  const rows = db.prepare('SELECT * FROM channel_comments WHERE post_id = ? ORDER BY id LIMIT 500').all(p.id);
+  res.json({ enabled: !c.no_comments, comments: rows.map((r) => { const u = q.userById.get(r.user_id); return { id: r.id, text: r.text, createdAt: r.created_at, user: u ? publicUser(u) : null,
+    canDelete: r.user_id === req.user.id || canPost(c.id, req.user.id) }; }) });
+});
+app.post('/api/channels/:id/posts/:pid/comments', auth, json, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  const p = cq.post.get(Number(req.params.pid));
+  if (!p || p.channel_id !== c.id) return fail(res, 404, 'Публикация не найдена');
+  if (c.no_comments) return fail(res, 403, 'Комментарии в канале выключены');
+  if (!cq.sub.get(c.id, req.user.id)) return fail(res, 403, 'Подпишитесь на канал, чтобы комментировать');
+  if (rateLimited('comment:' + req.user.id, 30, 60000)) return fail(res, 429, 'Слишком часто');
+  const text = String(req.body?.text || '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim().slice(0, 2000);
+  if (!text) return fail(res, 400, 'Пустой комментарий');
+  db.prepare('INSERT INTO channel_comments (post_id, user_id, text, created_at) VALUES (?, ?, ?, ?)').run(p.id, req.user.id, text, now());
+  chBroadcast(c.id, { type: 'channelComments', channelId: c.id, postId: p.id });
+  if (p.author_id !== req.user.id) pushTo(p.author_id, { title: c.title, body: `${req.user.display_name} прокомментировал(а) публикацию`, tag: 'ch-' + c.id, url: '/c/' + c.slug });
+  res.json({ ok: true });
+});
+app.delete('/api/channel-comments/:id', auth, (req, res) => {
+  const r = db.prepare('SELECT cc.*, cp.channel_id FROM channel_comments cc JOIN channel_posts cp ON cp.id = cc.post_id WHERE cc.id = ?').get(Number(req.params.id));
+  if (!r || (r.user_id !== req.user.id && !canPost(r.channel_id, req.user.id))) return fail(res, 404, 'Комментарий не найден');
+  db.prepare('DELETE FROM channel_comments WHERE id = ?').run(r.id);
+  chBroadcast(r.channel_id, { type: 'channelComments', channelId: r.channel_id, postId: r.post_id });
+  res.json({ ok: true });
+});
+
 app.post('/api/channels/:id/posts/:pid/react', auth, json, (req, res) => {
   const c = chGet(req, res); if (!c) return;
   const p = cq.post.get(Number(req.params.pid));

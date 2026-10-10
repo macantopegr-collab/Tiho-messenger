@@ -1069,6 +1069,7 @@
 
   /* ---------- открытый чат ---------- */
   function openChat(id) {
+    closeThread();
     const wasOpen = S.active != null || !!S.page || S.channel != null;
     S.page = null; S.channel = null;
     S.active = id;
@@ -1084,6 +1085,7 @@
     if (!box) loadMessages(id); else markRead();
   }
   function closeChat() {
+    closeThread();
     S.active = null;
     S.refs.app?.classList.remove('in-chat');
     renderList();
@@ -1441,7 +1443,7 @@
     return readers.length ? h('span', { 'aria-label': 'Прочитано', title: 'Прочитано' }, icon('check2', 15)) : h('span', { 'aria-label': 'Доставлено', title: 'Доставлено' }, icon('check', 13));
   }
 
-  function messageEl(chat, m, prev, next) {
+  function messageEl(chat, m, prev, next, lite = false) {
     const p = plainOf(m) || { t: 'error', reason: 'fail' };
     if (p.t === 'system') return h('div', { class: 'sys' }, p.text);
     if (p.t === 'call') return callPill(m, p, chat);
@@ -1495,6 +1497,11 @@
       bubble.append(p.reason === 'before' ? 'Отправлено до того, как вы вступили в чат' : 'Не удалось расшифровать сообщение', meta);
     }
 
+    if (!lite && m.thread?.count) {
+      bubble.append(h('button', { class: 'thread-btn', onclick: (e) => { e.stopPropagation(); openThread(chat, m); } },
+        h('span', { class: 'thread-avs' }, (m.thread.users || []).map((id) => userAvatar(memberOf(chat, id) || { displayName: '?', color: 7 }, 20))),
+        `${m.thread.count} ${plural(m.thread.count, 'ответ', 'ответа', 'ответов')}`, h('span', { class: 'muted' }, shortTime(m.thread.last))));
+    }
     if (m.reactions?.length) {
       bubble.append(h('div', { class: 'reacts' }, m.reactions.map((r) => {
         const minex = r.users.includes(S.me.id);
@@ -1503,13 +1510,14 @@
           'aria-pressed': String(minex), onclick: () => react(m, r.emoji) }, h('span', { class: 'emo' }, r.emoji), r.users.length > 1 ? String(r.users.length) : '');
       })));
     }
-    const live = p.t !== 'error' && p.t !== 'deleted' && p.t !== 'gift' && !m.pending;
+    const live = !lite && p.t !== 'error' && p.t !== 'deleted' && p.t !== 'gift' && !m.pending;
     const actions = live ? h('div', { class: 'msg-actions' },
       h('button', { 'aria-label': 'Ответить', title: 'Ответить', onclick: () => setReply(m, p, senderName) }, icon('reply', 18)),
       p.t === 'text' ? h('button', { 'aria-label': 'Копировать', title: 'Копировать', onclick: () => copyText(p.text) }, icon('copy', 17)) : null) : null;
     if (live) {
       const items = [
         ['reply', 'Ответить', () => setReply(m, p, senderName)],
+        chat.type === 'group' && !m.threadId && ['chat', 'Обсудить в ветке', () => openThread(chat, m)],
         p.t === 'text' && ['copy', 'Копировать текст', () => copyText(p.text)],
         isGif(p) && ['image', 'Сохранить в «Мои GIF»', () => { saveGif(p); toast('GIF сохранён'); }],
         p.t === 'file' && ['download', 'Скачать файл', () => downloadFile(p)],
@@ -2099,6 +2107,8 @@
     const box = S.msgs.get(chatId);
     const m = box?.list.find((x) => x.id === messageId);
     if (m) m.reactions = reactions;
+    const tm = S.thread?.chatId === chatId && [S.thread.root, ...S.thread.list].find((x) => x.id === messageId);
+    if (tm) { tm.reactions = reactions; drawThread(); }
     if (S.active === chatId) renderMessages();
   }
 
@@ -2113,6 +2123,15 @@
   async function sendPayload(payload, chatId = S.active, opts = {}) {
     const chat = S.chats.get(chatId);
     if (!chat) return;
+    if (opts.threadId) {
+      try {
+        const envelope = await C.encryptMessage(payload, { chatId, senderId: S.me.id, senderPriv: S.priv,
+          recipients: chat.members.map((m) => ({ id: m.id, publicKey: m.id === S.me.id ? S.pub : m.publicKey })) });
+        const { message } = await api(`/api/chats/${chatId}/messages`, { body: { envelope, threadId: opts.threadId, mentions: mentionIds(chat, payload) } });
+        threadMessage(message, payload);
+      } catch (e) { toast('Не отправлено: ' + e.message); }
+      return;
+    }
     if (S.reply && chatId === S.active) { payload.reply = S.reply; setReply(null); }
     if (opts.sendAt) {
       try {
@@ -2264,7 +2283,10 @@
   }
   const typingTimers = new Map();
   async function onEvent(d) {
-    if (d.type === 'message') return acceptMessage(d.message, d.clientId, undefined, d.mentioned);
+    if (d.type === 'message') {
+      if (d.message.threadId) return threadMessage(d.message, undefined, d.thread);
+      return acceptMessage(d.message, d.clientId, undefined, d.mentioned);
+    }
     if (d.type === 'chat') {
       const old = S.chats.get(d.chat.id);
       S.chats.set(d.chat.id, d.chat);
@@ -2312,6 +2334,11 @@
     }
     if (d.type === 'channelPostUpdated') { api(`/api/channels/${d.channelId}/posts/${d.postId}`).then((r) => replacePost(d.channelId, r.post)).catch(() => {}); return; }
     if (d.type === 'channelPostDeleted') return removePost(d.channelId, d.postId);
+    if (d.type === 'channelComments') {
+      if (S.commentsOpen?.postId === d.postId) S.commentsOpen.reload().catch(() => {});
+      api(`/api/channels/${d.channelId}/posts/${d.postId}`).then((r) => replacePost(d.channelId, r.post)).catch(() => {});
+      return;
+    }
     if (d.type === 'channel') return loadChannels();
     if (d.type === 'channelRemoved') return dropChannel(d.channelId);
     if (d.type === 'votes') {
@@ -3456,6 +3483,8 @@
       p.body.text ? h('div', { class: 'post-text' }, ...linkify(p.body.text)) : null,
       p.reactions.length ? h('div', { class: 'reacts' }, p.reactions.map((r) => h('button', { class: 'react' + (r.mine ? ' mine' : ''), 'aria-pressed': String(r.mine),
         onclick: () => reactPost(c, p, r.emoji) }, h('span', { class: 'emo' }, r.emoji), String(r.count)))) : null,
+      c.comments !== false ? h('button', { class: 'post-comments', onclick: () => openComments(c, p) }, icon('chat', 16, 1.9),
+        p.comments ? `${p.comments} ${plural(p.comments, 'комментарий', 'комментария', 'комментариев')}` : 'Комментировать', h('span', { class: 'chev' }, icon('chevron', 14))) : null,
       h('div', { class: 'post-meta' }, h('span', { class: 'views' }, icon('eye', 14), String(p.views)),
         p.editedAt ? h('span', { class: 'edited' }, 'изменено') : null, h('span', null, hm(p.createdAt))));
     const items = [
@@ -3597,9 +3626,12 @@
     const title = h('input', { class: 'input', value: c.title, maxlength: 64 });
     const about = h('textarea', { class: 'input', rows: 3, style: 'height:auto;padding:12px' });
     about.value = c.about || '';
+    const cm = h('button', { class: 'sw', role: 'switch', 'aria-checked': String(c.comments !== false), 'aria-label': 'Комментарии',
+      onclick: () => cm.setAttribute('aria-checked', String(cm.getAttribute('aria-checked') !== 'true')) });
     const close = modal('Изменить канал', [h('label', { class: 'field-label' }, 'Название', title), h('label', { class: 'field-label' }, 'Описание', about),
+      h('div', { class: 'card' }, h('div', { class: 'card-row' }, h('span', { class: 'grow' }, h('b', null, 'Комментарии'), h('small', null, 'Подписчики могут обсуждать публикации')), cm)),
       h('button', { class: 'btn block', onclick: async () => {
-        try { const { channel } = await api(`/api/channels/${c.id}`, { method: 'PATCH', body: { title: title.value, about: about.value } }); S.channels.set(channel.id, channel); close(); renderList(); renderChannelHead(); } catch (e) { toast(e.message); }
+        try { const { channel } = await api(`/api/channels/${c.id}`, { method: 'PATCH', body: { title: title.value, about: about.value, comments: cm.getAttribute('aria-checked') === 'true' } }); S.channels.set(channel.id, channel); close(); renderList(); renderChannelHead(); } catch (e) { toast(e.message); }
       } }, 'Сохранить')]);
   }
   function openNewChannel() {
@@ -4010,6 +4042,109 @@
         catch (e) { toast(e.message); }
       } }, 'Вступить в группу'),
     ]);
+  }
+
+  /* ---------- Ветки ответов ---------- */
+  async function threadMessage(msg, payload, thread) {
+    const chat = S.chats.get(msg.chatId);
+    if (!chat) return;
+    if (payload) S.plain.set(msg.id, cleanPayload(payload)); else await decryptMsg(msg, chat);
+    const box = S.msgs.get(chat.id);
+    const root = box?.list.find((x) => x.id === msg.threadId);
+    if (root && (thread || !payload)) {
+      root.thread = thread || { count: (root.thread?.count || 0) + 1, last: msg.createdAt, users: [msg.senderId, ...(root.thread?.users || []).filter((x) => x !== msg.senderId)].slice(0, 3) };
+      if (S.active === chat.id && !S.thread) renderMessages('keep');
+    }
+    const t = S.thread;
+    if (t && t.rootId === msg.threadId && !t.list.some((x) => x.id === msg.id)) {
+      t.list.push(msg); t.root.thread = root?.thread || thread || t.root.thread;
+      drawThread(true);
+    }
+  }
+  async function openThread(chat, rootMsg) {
+    closeThread();
+    const panel = h('section', { class: 'thread-panel', role: 'dialog', 'aria-label': 'Ветка' });
+    const list = h('div', { class: 'msgs thread-msgs' });
+    const input = h('textarea', { rows: 1, placeholder: 'Ответить в ветке', 'aria-label': 'Ответ в ветке' });
+    const send = async () => {
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = ''; input.style.height = 'auto';
+      await sendPayload({ t: 'text', text }, chat.id, { threadId: rootMsg.id });
+    };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !COARSE && !e.isComposing) { e.preventDefault(); send(); } if (e.key === 'Escape') closeThread(); });
+    input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 140) + 'px'; });
+    panel.append(
+      h('header', { class: 'chat-head' }, h('button', { class: 'icon-btn', 'aria-label': 'Закрыть ветку', onclick: closeThread }, icon('back', 24)),
+        h('div', { class: 'head-title' }, h('b', null, 'Ветка'), h('small', null, chat.title))),
+      list,
+      allowed(chat, 'send') ? h('div', { class: 'composer' }, h('div', { class: 'field' }, input),
+        h('button', { class: 'send', 'aria-label': 'Отправить в ветку', onclick: send }, icon('send', 20, 2.2))) : null);
+    S.refs.pane.append(panel);
+    S.thread = { chatId: chat.id, rootId: rootMsg.id, root: rootMsg, list: [], panel, listEl: list, chat };
+    drawThread();
+    try {
+      const r = await api(`/api/chats/${chat.id}/threads/${rootMsg.id}`);
+      await Promise.all([r.root, ...r.messages].map((m) => decryptMsg(m, chat)));
+      if (S.thread?.rootId !== rootMsg.id) return;
+      S.thread.root = r.root;
+      for (const m of r.messages) if (!S.thread.list.some((x) => x.id === m.id)) S.thread.list.push(m);
+      S.thread.list.sort((a, b) => a.id - b.id);
+      drawThread(true);
+    } catch (e) { toast(e.message); }
+    if (!COARSE) input.focus();
+  }
+  function drawThread(bottom) {
+    const t = S.thread;
+    if (!t) return;
+    const chat = S.chats.get(t.chatId) || t.chat;
+    const el = clear(t.listEl);
+    el.append(messageEl(chat, t.root, null, null, true));
+    const n = t.list.length;
+    el.append(h('div', { class: 'day' }, h('span', null, n ? `${n} ${plural(n, 'ответ', 'ответа', 'ответов')}` : 'Пока нет ответов — начните обсуждение')));
+    t.list.forEach((m, i) => el.append(messageEl(chat, m, t.list[i - 1], t.list[i + 1], true)));
+    if (bottom) el.scrollTop = el.scrollHeight;
+  }
+  function closeThread() {
+    if (!S.thread) return;
+    S.thread.panel.remove(); S.thread = null;
+    if (S.active) renderMessages('keep');
+  }
+
+  /* ---------- Комментарии к публикациям канала ---------- */
+  async function openComments(c, post) {
+    c = S.channels.get(c.id) || c;
+    let data;
+    try { data = await api(`/api/channels/${c.id}/posts/${post.id}/comments`); } catch (e) { return toast(e.message); }
+    const listEl = h('div', { class: 'comment-list' });
+    const draw = () => {
+      clear(listEl);
+      if (!data.comments.length) listEl.append(h('div', { class: 'list-empty' }, 'Комментариев пока нет'));
+      for (const cm of data.comments) {
+        listEl.append(h('div', { class: 'comment' }, userAvatar(cm.user || { displayName: '?' }, 34),
+          h('div', { class: 'comment-body' }, h('div', { class: 'comment-head' }, h('b', null, cm.user?.displayName || 'Удалённый'), h('small', { class: 'muted' }, shortTime(cm.createdAt))),
+            h('div', { class: 'comment-text' }, ...linkify(cm.text))),
+          cm.canDelete ? h('button', { class: 'icon-btn', 'aria-label': 'Удалить комментарий', onclick: async () => {
+            try { await api('/api/channel-comments/' + cm.id, { method: 'DELETE' }); await reload(); } catch (e) { toast(e.message); }
+          } }, icon('trash', 16)) : null));
+      }
+      listEl.scrollTop = listEl.scrollHeight;
+    };
+    const reload = async () => { data = await api(`/api/channels/${c.id}/posts/${post.id}/comments`); draw(); };
+    const input = h('input', { class: 'input', placeholder: 'Ваш комментарий', maxlength: 2000, 'aria-label': 'Комментарий' });
+    const send = async () => {
+      const text = input.value.trim();
+      if (!text) return;
+      try { await api(`/api/channels/${c.id}/posts/${post.id}/comments`, { body: { text } }); input.value = ''; await reload(); } catch (e) { toast(e.message); }
+    };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); send(); } });
+    const foot = !data.enabled ? h('p', { class: 'muted' }, 'Комментарии выключены')
+      : c.subscribed ? h('div', { class: 'comment-input' }, input, h('button', { class: 'send', 'aria-label': 'Отправить комментарий', onclick: send }, icon('send', 18, 2.2)))
+        : h('button', { class: 'btn block', onclick: () => { close(); joinChannel(c); } }, 'Подписаться, чтобы комментировать');
+    const close = modal('Комментарии', [post.body.text ? h('blockquote', { class: 'comment-post' }, post.body.text.slice(0, 300)) : null, listEl, foot].filter(Boolean),
+      { onClose: () => { if (S.commentsOpen?.postId === post.id) S.commentsOpen = null; } });
+    S.commentsOpen = { postId: post.id, reload };
+    draw();
   }
 
   /* ---------- Отложенные сообщения ---------- */
