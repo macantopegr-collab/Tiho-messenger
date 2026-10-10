@@ -55,6 +55,11 @@
     camera: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13.5" r="3.5"/>',
     volume: '<path d="M4 9v6h4l5 4V5L8 9Z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/>',
     files: '<path d="M14 3H6v18h12V7Z"/><path d="M14 3v4h4M9 13h6M9 17h6"/>',
+    gift: '<rect x="3" y="8" width="18" height="5" rx="1"/><path d="M5 13v8h14v-8M12 8v13M12 8C10 4 6 4 6 6.5S10 8 12 8ZM12 8c2-4 6-4 6-1.5S14 8 12 8Z"/>',
+    starFill: '<path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.4l-5.9 3.1 1.2-6.5L2.5 9.4l6.6-.9Z" fill="currentColor"/>',
+    sparkle: '<path d="M12 3c.8 4.6 2.4 6.2 7 7-4.6.8-6.2 2.4-7 7-.8-4.6-2.4-6.2-7-7 4.6-.8 6.2-2.4 7-7ZM19 15c.3 1.7.9 2.3 2.6 2.6-1.7.3-2.3.9-2.6 2.6-.3-1.7-.9-2.3-2.6-2.6 1.7-.3 2.3-.9 2.6-2.6Z"/>',
+    swap: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
+    eyeOff: '<path d="M3 3l18 18M10.6 6.2A10 10 0 0 1 12 6c6.5 0 10 6 10 6a17 17 0 0 1-3.2 3.9M6.6 6.6C3.8 8.3 2 12 2 12s3.5 7 10 7a9.6 9.6 0 0 0 4.4-1.1M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
     chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>',
   };
   function icon(name, size = 22, sw = 2) {
@@ -118,7 +123,7 @@
     me: null, priv: null, pub: null, config: { maxFile: 25 * 1024 * 1024 },
     chats: new Map(), msgs: new Map(), plain: new Map(), userKeys: new Map(),
     active: null, filter: 'all', query: '', people: [], typing: new Map(),
-    tab: 'chats', page: null, reply: null, edit: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
+    tab: 'chats', page: null, wallet: null, catalog: null, reply: null, edit: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
   };
 
   /* ---------- форматирование ---------- */
@@ -208,6 +213,7 @@
   async function decryptMsg(msg, chat) {
     if (msg.kind === 'system') return { t: 'system', text: String(msg.body?.text || '') };
     if (msg.kind === 'deleted') return { t: 'deleted' };
+    if (msg.kind === 'gift') return { t: 'gift', ...msg.body };
     if (msg.payload) return msg.payload;
     if (S.plain.has(msg.id)) return S.plain.get(msg.id);
     let p;
@@ -222,13 +228,14 @@
     S.plain.set(msg.id, p);
     return p;
   }
-  const plainOf = (msg) => msg.kind === 'deleted' ? { t: 'deleted' } : (S.plain.get(msg.id) || msg.payload || (msg.kind === 'system' ? { t: 'system', text: msg.body?.text || '' } : undefined));
+  const plainOf = (msg) => msg.kind === 'gift' ? { t: 'gift', ...msg.body } : msg.kind === 'deleted' ? { t: 'deleted' } : (S.plain.get(msg.id) || msg.payload || (msg.kind === 'system' ? { t: 'system', text: msg.body?.text || '' } : undefined));
   function previewOf(p) {
     if (!p) return '…';
     if (p.t === 'text') return p.text.replace(/\s+/g, ' ');
     if (p.t === 'file') return (p.mime.startsWith('image/') ? 'Фото' : p.mime.startsWith('audio/') && p.wave ? 'Голосовое сообщение' : 'Файл: ' + p.name) + (p.caption ? ' · ' + p.caption : '');
     if (p.t === 'system') return p.text;
     if (p.t === 'deleted') return 'Сообщение удалено';
+    if (p.t === 'gift') return '🎁 ' + ((S.catalog?.gifts || []).find((x) => x.id === p.type)?.name ? `Подарок «${S.catalog.gifts.find((x) => x.id === p.type).name}»` : 'Подарок');
     return p.reason === 'before' ? 'Сообщение до вашего вступления' : 'Не удалось расшифровать';
   }
 
@@ -577,6 +584,7 @@
     renderList();
     renderPane();
     loadChats().then(openFromLink);
+    getCatalog().then(() => { renderList(); if (S.active) renderMessages(); }).catch(() => {});
     connect();
   }
 
@@ -678,6 +686,7 @@
   /* ---------- Профиль и настройки ---------- */
   function renderProfileTab() {
     const v = S.refs.profileView;
+    if (!S.wallet) getWallet().then(() => { if (S.tab === 'profile') renderProfileTab(); }).catch(() => {});
     const row = (ic, title, sub, fn, cls) => h('button', { class: 'card-row' + (cls ? ' ' + cls : ''), onclick: fn },
       h('span', { class: 'ic' }, icon(ic, 20, 1.8)), h('span', { class: 'grow' }, h('b', null, title), sub ? h('small', null, sub) : null),
       cls ? null : h('span', { class: 'chev' }, icon('chevron', 18)));
@@ -687,6 +696,11 @@
         h('div', { class: 'card' }, h('button', { class: 'card-row me-row', onclick: openMyProfile },
           userAvatar(S.me, 56), h('span', { class: 'grow' }, h('b', null, S.me.displayName), h('small', null, '@' + S.me.username + (S.me.bio ? ' · ' + S.me.bio : ''))),
           h('span', { class: 'chev' }, icon('chevron', 18)))),
+        h('div', { class: 'card' },
+          h('button', { class: 'card-row', onclick: openWallet }, h('span', { class: 'ic star-ic' }, icon('starFill', 20, 0)),
+            h('span', { class: 'grow' }, h('b', null, 'Звёзды'), h('small', null, 'Баланс и ежедневный бонус')),
+            S.wallet ? starBadge(S.wallet.stars) : null, h('span', { class: 'chev' }, icon('chevron', 18))),
+          row('gift', 'Мои подарки', 'Коллекция в вашем профиле', openMyGifts)),
         h('div', { class: 'card' },
           row('bell', 'Уведомления', 'Звук, текст в уведомлениях', openNotifications),
           row('shield', 'Конфиденциальность', 'Google, двухфакторная защита, ключ шифрования', openPrivacy),
@@ -1032,13 +1046,17 @@
       : h('div', { class: 'pg-actions' },
         action('chat', 'Написать', () => openDirect(u.id)),
         action('shield', 'Ключ', async () => { if (chat) openInfo(chat.id); else toast('Сначала напишите собеседнику'); }),
-        action('link', 'Ссылка', () => copyText(`${location.origin}/@${u.username}`)),
-        action('more', 'Ещё', (e) => {
-          const r = e.currentTarget.getBoundingClientRect();
-          openMenu(r.left, r.bottom + 6, [['copy', 'Скопировать юзернейм', () => copyText('@' + u.username)]]);
-        }));
+        action('gift', 'Подарить', () => openGiftShop(u)),
+        action('link', 'Ссылка', () => copyText(`${location.origin}/@${u.username}`)));
     const listCard = h('div', { class: 'card pg-list' });
-    body.append(hero, actions, listCard);
+    const giftsBox = h('div', { class: 'section' });
+    body.append(hero, actions, giftsBox, listCard);
+    if (!isGroup) {
+      api(`/api/users/${u.id}/gifts`).then(({ gifts }) => {
+        if (S.page !== pg || !gifts.length) return;
+        giftsBox.append(h('div', { class: 'section-title' }, `Подарки · ${gifts.length}`), giftGrid(gifts.slice(0, 12), 84));
+      }).catch(() => {});
+    }
 
     const fill = () => {
       if (S.page !== pg) return;
@@ -1047,7 +1065,7 @@
       const row = (ic, label, count, fn) => h('button', { class: 'card-row', onclick: fn, disabled: !count },
         h('span', { class: 'ic' }, icon(ic, 19, 1.9)), h('span', { class: 'grow' }, h('b', null, label)),
         h('span', { class: 'muted' }, String(count)), h('span', { class: 'chev' }, icon('chevron', 18)));
-      clear(listCard).append(
+      clear(listCard).append(...[
         row('image', 'Медиа', st.images.length, () => modal('Медиа', [h('div', { class: 'media-grid' }, st.images.map((p) => thumb(p, 104)))])),
         st.images.length ? h('div', { class: 'media-strip' }, st.images.slice(0, 4).map((p) => thumb(p, 72))) : null,
         row('files', 'Файлы', st.files.length, () => modal('Файлы', [h('div', { class: 'file-list' }, st.files.map((p) => fileEl(p)))])),
@@ -1056,7 +1074,7 @@
         isGroup ? null : row('group', 'Общие группы', groups.length, () => {
           const close = modal('Общие группы', [h('div', { class: 'card' }, groups.map((g) => h('button', { class: 'card-row', onclick: () => { close(); openChat(g.id); } },
             avatar(g, 40), h('span', { class: 'grow' }, h('b', null, g.title), h('small', null, `${g.members.length} ${plural(g.members.length, 'участник', 'участника', 'участников')}`)))))]);
-        }));
+        })].filter(Boolean));
       if (isGroup) {
         body.querySelector('.pg-members')?.remove();
         body.append(h('div', { class: 'section pg-members' }, h('div', { class: 'section-title' }, 'Участники'),
@@ -1164,7 +1182,7 @@
     const p = plainOf(m) || { t: 'error', reason: 'fail' };
     if (p.t === 'system') return h('div', { class: 'sys' }, p.text);
     const mine = m.senderId === S.me.id;
-    const near = (a, b) => a && b && a.kind === 'msg' && b.kind === 'msg' && a.senderId === b.senderId &&
+    const near = (a, b) => a && b && a.kind === 'msg' && b.kind === 'msg' && a.senderId === b.senderId && p.t !== 'gift' &&
       Math.abs(a.createdAt - b.createdAt) < 5 * 60000 && sameDay(a.createdAt, b.createdAt);
     const firstOfGroup = !near(prev, m);
     const lastOfGroup = !near(m, next);
@@ -1182,6 +1200,9 @@
     }
     if (p.t === 'text') {
       bubble.append(...linkify(p.text), meta);
+    } else if (p.t === 'gift') {
+      bubble.classList.add('gift-b');
+      bubble.append(giftBubble(m, p, mine, sender), meta);
     } else if (p.t === 'deleted') {
       bubble.classList.add('bad');
       bubble.append(h('span', { class: 'del' }, icon('trash', 15, 1.8), 'Сообщение удалено'), meta);
@@ -1204,7 +1225,7 @@
           'aria-pressed': String(minex), onclick: () => react(m, r.emoji) }, h('span', { class: 'emo' }, r.emoji), r.users.length > 1 ? String(r.users.length) : '');
       })));
     }
-    const live = p.t !== 'error' && p.t !== 'deleted' && !m.pending;
+    const live = p.t !== 'error' && p.t !== 'deleted' && p.t !== 'gift' && !m.pending;
     const actions = live ? h('div', { class: 'msg-actions' },
       h('button', { 'aria-label': 'Ответить', title: 'Ответить', onclick: () => setReply(m, p, senderName) }, icon('reply', 18)),
       p.t === 'text' ? h('button', { 'aria-label': 'Копировать', title: 'Копировать', onclick: () => copyText(p.text) }, icon('copy', 17)) : null) : null;
@@ -1400,7 +1421,11 @@
       syncBtn();
       if (!COARSE) input.focus();
     };
-    const attachBtn = h('button', { class: 'icon-btn', style: 'color:var(--muted)', 'aria-label': 'Прикрепить фото или файл', title: 'Прикрепить', onclick: () => fileInput.click() }, icon('attach', 24, 1.8));
+    const attachBtn = h('button', { class: 'icon-btn', style: 'color:var(--muted)', 'aria-label': 'Прикрепить фото или файл', title: 'Прикрепить', onclick: (e) => {
+      if (chat.type !== 'direct') return fileInput.click();
+      const r = e.currentTarget.getBoundingClientRect();
+      openMenu(r.left, r.top - 110, [['image', 'Фото или файл', () => fileInput.click()], ['gift', 'Подарок', () => openGiftShop(other(chat))]]);
+    } }, icon('attach', 24, 1.8));
     const EMOJI = '😀 😂 🥹 😊 😍 🥰 😘 😎 🤔 😅 😭 😡 🥳 😴 🤗 🙃 👍 👎 👏 🙏 💪 🤝 👋 ✌️ ❤️ 💙 💚 🔥 ✨ 🎉 💯 ✅ ❌ ⚡ 🌙 ☀️ 🌧 🍕 ☕ 🎁 🐱 🐶 🌲 🏔 🚗 ✈️ 📍 ⏰'.split(' ');
     const emojiPanel = h('div', { class: 'emoji-panel', hidden: true, role: 'dialog', 'aria-label': 'Эмодзи' }, EMOJI.map((e) =>
       h('button', { type: 'button', 'aria-label': e, onclick: () => {
@@ -1724,6 +1749,7 @@
       return;
     }
     if (d.type === 'messageUpdated') return applyUpdated(d.message);
+    if (d.type === 'wallet') { S.wallet = { ...(S.wallet || {}), ...d.wallet }; if (S.tab === 'profile') renderProfileTab(); return; }
     if (d.type === 'reactions') return applyReactions(d.chatId, d.messageId, d.reactions);
     if (d.type === 'chatRemoved') {
       S.chats.delete(d.chatId); S.msgs.delete(d.chatId);
@@ -2146,6 +2172,158 @@
       try { await api('/api/2fa/disable', { body: { code: code.value } }); close(); toast('Двухфакторная защита отключена'); }
       catch (e) { err.textContent = e.message; btn.disabled = false; }
     });
+  }
+
+  /* ================= ПОДАРКИ И ЗВЁЗДЫ ================= */
+  const starBadge = (n) => h('span', { class: 'stars' }, icon('starFill', 15, 0), String(n));
+  async function getCatalog(force) {
+    if (!S.catalog || force) S.catalog = await api('/api/gifts/catalog');
+    return S.catalog;
+  }
+  async function getWallet() { S.wallet = await api('/api/wallet'); return S.wallet; }
+  const giftArt = (g, size, cls = '') => h('div', { class: 'gift-art ' + cls + (g.upgraded ? ' up' : ''), style: `width:${size}px;height:${size}px` },
+    TihoGifts.el(g.type, g.upgraded ? { model: g.model?.name, backdrop: g.backdrop?.name, symbol: g.symbol?.name } : {}));
+  const giftTitle = (g) => g.name + (g.upgraded && g.serial ? ` #${g.serial}` : '');
+
+  /* Магазин подарков для конкретного человека */
+  async function openGiftShop(user) {
+    let cat, w;
+    try { [cat, w] = await Promise.all([getCatalog(true), getWallet()]); } catch (e) { toast(e.message); return; }
+    const close = modal('Подарок для ' + user.displayName, [
+      h('div', { class: 'wallet-line' }, h('span', null, 'Ваш баланс'), starBadge(w.stars),
+        h('button', { class: 'link', onclick: () => { close(); openWallet(); } }, 'Пополнить')),
+      h('div', { class: 'gift-grid' }, cat.gifts.map((g) => {
+        const out = g.left === 0;
+        return h('button', { class: 'gift-card', disabled: out, onclick: () => { close(); confirmGift(user, g, w.stars); } },
+          giftArt({ type: g.id }, 84),
+          h('b', null, g.name),
+          out ? h('span', { class: 'sold' }, 'Раскуплено') : starBadge(g.price),
+          g.supply ? h('small', { class: 'limited' }, out ? `тираж ${g.supply}` : `осталось ${g.left} из ${g.supply}`) : null);
+      })),
+      h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' },
+        'Подарок появится в профиле получателя. Его можно улучшить до коллекционного — с номером и редкими узорами — или обменять на звёзды.'),
+    ]);
+  }
+  function confirmGift(user, g, balance) {
+    const err = h('div', { class: 'err', role: 'alert' });
+    const btn = h('button', { class: 'btn block big', disabled: balance < g.price }, 'Подарить за ', starBadge(g.price));
+    const close = modal('Подарок', [
+      h('div', { class: 'gift-hero' }, giftArt({ type: g.id }, 168, 'pop-in'), h('h3', null, g.name),
+        h('span', { class: 'muted' }, `для ${user.displayName}`),
+        g.supply ? h('span', { class: 'limited' }, `Лимитированный · осталось ${g.left} из ${g.supply}`) : null),
+      balance < g.price ? h('div', { class: 'note' }, icon('warn', 18), h('span', null, `Не хватает звёзд: у вас ${balance}. Заберите ежедневный бонус в разделе «Звёзды».`)) : null,
+      err, btn,
+    ]);
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; err.textContent = '';
+      try {
+        const r = await api('/api/gifts/send', { body: { type: g.id, userId: user.id } });
+        S.wallet = { ...S.wallet, ...r.wallet };
+        close(); toast(`Подарок «${g.name}» отправлен`);
+        if (!S.chats.has(r.chatId)) await loadChats();
+        openChat(r.chatId);
+      } catch (e) { err.textContent = e.message; btn.disabled = false; }
+    });
+  }
+
+  /* Карточка подарка */
+  async function openGift(id) {
+    let g;
+    try { g = (await api('/api/gifts/' + id)).gift; } catch (e) { toast(e.message); return; }
+    const mine = g.owner?.id === S.me.id;
+    const attr = (label, a) => a ? h('div', { class: 'attr' }, h('span', null, label), h('b', null, a.name), h('em', null, (a.rarity < 1 ? a.rarity.toFixed(1) : a.rarity.toFixed(0)) + '%')) : null;
+    const rows = h('div', { class: 'card gift-rows' },
+      h('div', { class: 'gr' }, h('span', null, 'Владелец'), h('b', null, g.owner ? g.owner.displayName : '—')),
+      g.sender ? h('div', { class: 'gr' }, h('span', null, 'От кого'), h('b', null, g.sender.displayName)) : null,
+      h('div', { class: 'gr' }, h('span', null, 'Получен'), h('b', null, new Date(g.createdAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }))),
+      g.upgraded ? null : h('div', { class: 'gr' }, h('span', null, 'Цена'), starBadge(g.price)));
+    const actions = [];
+    if (mine && !g.upgraded) {
+      actions.push(h('button', { class: 'btn block big shine', onclick: () => upgradeGift(g, close) }, icon('sparkle', 18), 'Сделать коллекционным за ', starBadge(g.upgradePrice)));
+      actions.push(h('button', { class: 'btn ghost block', onclick: async () => {
+        if (!confirm(`Обменять «${g.name}» на ${g.convertValue} звёзд? Подарок исчезнет из профиля.`)) return;
+        try { await api(`/api/gifts/${g.id}/convert`, { method: 'POST' }); close(); toast(`+${g.convertValue} звёзд`); refreshGiftViews(); } catch (e) { toast(e.message); }
+      } }, icon('swap', 18), `Обменять на ${g.convertValue} звёзд`));
+    }
+    if (mine && g.upgraded) {
+      actions.push(h('button', { class: 'btn block big', onclick: () => { close(); chooseRecipient(g); } }, icon('send', 18), 'Передать'));
+    }
+    if (mine) {
+      actions.push(h('button', { class: 'btn ghost block', onclick: async () => {
+        try { await api(`/api/gifts/${g.id}/hide`, { body: { hidden: !g.hidden } }); close(); toast(g.hidden ? 'Подарок снова в профиле' : 'Подарок скрыт из профиля'); refreshGiftViews(); } catch (e) { toast(e.message); }
+      } }, icon(g.hidden ? 'eye' : 'eyeOff', 18), g.hidden ? 'Показать в профиле' : 'Скрыть из профиля'));
+    }
+    const close = modal(g.upgraded ? 'Коллекционный подарок' : 'Подарок', [
+      h('div', { class: 'gift-hero' }, giftArt(g, 200, 'pop-in'), h('h3', null, giftTitle(g)),
+        g.upgraded ? h('span', { class: 'muted' }, g.supply ? `Коллекционный · ${g.serial} из ${g.supply}` : `Коллекционный · №${g.serial}`) : h('span', { class: 'muted' }, 'Обычный подарок')),
+      g.upgraded ? h('div', { class: 'attrs' }, attr('Модель', g.model), attr('Фон', g.backdrop), attr('Узор', g.symbol)) : null,
+      rows, ...actions,
+    ]);
+  }
+  async function upgradeGift(g, closePrev) {
+    try {
+      const r = await api(`/api/gifts/${g.id}/upgrade`, { method: 'POST' });
+      closePrev();
+      const reveal = h('div', { class: 'reveal' }, h('div', { class: 'reveal-spin' }, giftArt({ type: g.type }, 200)));
+      const close = modal('Улучшаем…', [reveal]);
+      setTimeout(() => { close(); openGift(r.gift.id); refreshGiftViews(); }, 1400);
+    } catch (e) { toast(e.message); }
+  }
+  function chooseRecipient(g) {
+    const people = allContacts();
+    const close = modal(`Кому передать «${giftTitle(g)}»?`, [
+      people.length ? h('div', { class: 'card' }, people.map((u) => h('button', { class: 'card-row', onclick: async () => {
+        if (!confirm(`Передать «${giftTitle(g)}» пользователю ${u.displayName}? Подарок станет его.`)) return;
+        try { const r = await api(`/api/gifts/${g.id}/transfer`, { body: { userId: u.id } }); close(); toast('Подарок передан'); if (!S.chats.has(r.chatId)) await loadChats(); openChat(r.chatId); }
+        catch (e) { toast(e.message); }
+      } }, userAvatar(u, 40), h('span', { class: 'grow' }, h('b', null, u.displayName), h('small', null, '@' + u.username)))))
+        : h('p', { class: 'muted' }, 'Сначала начните переписку с человеком, которому хотите передать подарок.'),
+    ]);
+  }
+  function giftGrid(gifts, size = 96, beforeOpen) {
+    return h('div', { class: 'gift-shelf' }, gifts.map((g) => h('button', { class: 'shelf-item' + (g.hidden ? ' hidden-gift' : ''), onclick: () => { beforeOpen?.(); openGift(g.id); }, 'aria-label': giftTitle(g) },
+      giftArt(g, size), h('span', null, giftTitle(g)))));
+  }
+  async function openMyGifts() {
+    let gifts = [];
+    try { gifts = (await api(`/api/users/${S.me.id}/gifts`)).gifts; } catch (e) { toast(e.message); return; }
+    const close = modal('Мои подарки', [gifts.length ? giftGrid(gifts, 96, () => close()) : h('div', { class: 'list-empty' },
+      h('div', { class: 'empty-ic' }, icon('gift', 28)), h('b', null, 'Пока нет подарков'),
+      h('span', null, 'Подарите что-нибудь другу — откройте его профиль и нажмите «Подарить».'))]);
+  }
+  async function openWallet() {
+    let w;
+    try { w = await getWallet(); } catch (e) { toast(e.message); return; }
+    const left = Math.max(0, w.nextClaimAt - Date.now());
+    const hrs = Math.floor(left / 3600000), mins = Math.ceil((left % 3600000) / 60000);
+    const claim = h('button', { class: 'btn block big', disabled: !w.canClaim }, w.canClaim ? `Забрать ${w.daily} звёзд` : `Следующий бонус через ${hrs ? hrs + ' ч ' : ''}${mins} мин`);
+    claim.addEventListener('click', async () => {
+      claim.disabled = true;
+      try { S.wallet = await api('/api/wallet/daily', { method: 'POST' }); close(); toast(`+${w.daily} звёзд`); renderMe(); openWallet(); } catch (e) { toast(e.message); }
+    });
+    const close = modal('Звёзды', [
+      h('div', { class: 'wallet-hero' }, h('div', { class: 'big-star' }, icon('starFill', 44, 0)), h('b', null, String(w.stars)), h('span', { class: 'muted' }, 'звёзд на балансе')),
+      claim,
+      h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45;text-align:center' }, 'Звёзды — внутренняя валюта «Тихо» для подарков. Каждый день можно забрать бонус.'),
+      w.history?.length ? h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'История'),
+        h('div', { class: 'card' }, w.history.map((x) => h('div', { class: 'card-row hist' },
+          h('span', { class: 'grow' }, h('b', null, x.reason), h('small', null, new Date(x.created_at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))),
+          h('b', { class: x.amount > 0 ? 'plus' : 'minus' }, (x.amount > 0 ? '+' : '') + x.amount))))) : null,
+    ]);
+  }
+  function refreshGiftViews() {
+    if (S.tab === 'profile') renderProfileTab();
+    if (S.page?.type === 'contact') renderPane();
+  }
+  function giftBubble(m, p, mine, sender) {
+    const t = (S.catalog?.gifts || []).find((x) => x.id === p.type);
+    const name = t?.name || 'Подарок';
+    const who = sender?.displayName?.split(' ')[0] || 'Собеседник';
+    const text = p.action === 'transfer'
+      ? (mine ? `Вы передали коллекционный «${name}»` : `${who} передаёт вам коллекционный «${name}»`)
+      : (mine ? `Вы подарили «${name}»` : `${who} дарит вам «${name}»`);
+    return h('div', { class: 'gift-msg' }, giftArt({ type: p.type }, 120, 'float'), h('b', null, text),
+      h('button', { class: 'btn ghost gift-open', onclick: () => openGift(p.giftId) }, mine ? 'Посмотреть' : 'Открыть подарок'));
   }
 
   /* ================= ЗАПУСК ================= */

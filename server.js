@@ -748,6 +748,211 @@ app.get('/api/files/:id', auth, (req, res) => {
   fs.createReadStream(path.join(FILES_DIR, id)).pipe(res);
 });
 
+/* ---------- Звёзды и подарки ---------- */
+const GIFTS = [
+  { id: 'heart', name: 'Сердце', price: 15, upgrade: 25 },
+  { id: 'star', name: 'Звезда', price: 25, upgrade: 25 },
+  { id: 'flower', name: 'Цветок', price: 50, upgrade: 50 },
+  { id: 'cake', name: 'Торт', price: 50, upgrade: 50 },
+  { id: 'box', name: 'Подарок', price: 100, upgrade: 50 },
+  { id: 'cat', name: 'Кот', price: 150, upgrade: 75, supply: 5000 },
+  { id: 'rocket', name: 'Ракета', price: 250, upgrade: 100, supply: 2000 },
+  { id: 'trophy', name: 'Кубок', price: 350, upgrade: 100, supply: 1000 },
+  { id: 'gem', name: 'Алмаз', price: 500, upgrade: 150, supply: 500 },
+  { id: 'crown', name: 'Корона', price: 1000, upgrade: 250, supply: 100 },
+];
+const GIFT_BY_ID = new Map(GIFTS.map((g) => [g.id, g]));
+// Вес — в промилле: 5 → 0,5 %
+const MODELS = [['Изумруд', 300], ['Мята', 250], ['Сапфир', 180], ['Рубин', 120], ['Аметист', 80], ['Золото', 50], ['Неон', 15], ['Полночь', 5]];
+const BACKDROPS = [['Лес', 260], ['Океан', 220], ['Закат', 180], ['Графит', 150], ['Сирень', 110], ['Песок', 50], ['Изумрудная ночь', 25], ['Северное сияние', 5]];
+const SYMBOLS = [['Звёзды', 260], ['Листья', 220], ['Сердца', 180], ['Молнии', 150], ['Искры', 110], ['Луны', 50], ['Короны', 25], ['Ключи', 5]];
+const START_STARS = 500, DAILY_STARS = 50, DAILY_EVERY = 20 * 3600 * 1000;
+{
+  const cols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+  if (!cols.has('stars')) db.exec(`ALTER TABLE users ADD COLUMN stars INTEGER NOT NULL DEFAULT ${START_STARS}`);
+  if (!cols.has('bonus_at')) db.exec('ALTER TABLE users ADD COLUMN bonus_at INTEGER NOT NULL DEFAULT 0');
+  db.exec(`CREATE TABLE IF NOT EXISTS gifts (
+    id INTEGER PRIMARY KEY,
+    type TEXT NOT NULL,
+    sender_id INTEGER REFERENCES users(id),
+    owner_id INTEGER NOT NULL REFERENCES users(id),
+    created_at INTEGER NOT NULL,
+    upgraded_at INTEGER, serial INTEGER, model TEXT, backdrop TEXT, symbol TEXT,
+    hidden INTEGER NOT NULL DEFAULT 0, converted INTEGER NOT NULL DEFAULT 0);
+  CREATE INDEX IF NOT EXISTS idx_gifts_owner ON gifts(owner_id);
+  CREATE TABLE IF NOT EXISTS star_log (
+    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    amount INTEGER NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL);`);
+}
+const gq = {
+  stars: db.prepare('SELECT stars, bonus_at FROM users WHERE id = ?'),
+  addStars: db.prepare('UPDATE users SET stars = stars + ? WHERE id = ?'),
+  setBonus: db.prepare('UPDATE users SET bonus_at = ? WHERE id = ?'),
+  log: db.prepare('INSERT INTO star_log (user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)'),
+  history: db.prepare('SELECT amount, reason, created_at FROM star_log WHERE user_id = ? ORDER BY id DESC LIMIT 30'),
+  sold: db.prepare('SELECT type, COUNT(*) AS n FROM gifts GROUP BY type'),
+  soldOf: db.prepare('SELECT COUNT(*) AS n FROM gifts WHERE type = ?'),
+  upgradedOf: db.prepare('SELECT COUNT(*) AS n FROM gifts WHERE type = ? AND upgraded_at IS NOT NULL'),
+  insert: db.prepare('INSERT INTO gifts (type, sender_id, owner_id, created_at) VALUES (?, ?, ?, ?)'),
+  byId: db.prepare('SELECT * FROM gifts WHERE id = ?'),
+  ofUser: db.prepare('SELECT * FROM gifts WHERE owner_id = ? AND converted = 0 ORDER BY COALESCE(upgraded_at, 0) DESC, id DESC LIMIT 200'),
+  upgrade: db.prepare('UPDATE gifts SET upgraded_at = ?, serial = ?, model = ?, backdrop = ?, symbol = ? WHERE id = ?'),
+  convert: db.prepare('UPDATE gifts SET converted = 1 WHERE id = ?'),
+  transfer: db.prepare('UPDATE gifts SET owner_id = ?, hidden = 0 WHERE id = ?'),
+  hide: db.prepare('UPDATE gifts SET hidden = ? WHERE id = ?'),
+};
+const rarityOf = (list, name) => { const r = list.find((x) => x[0] === name); return r ? r[1] / 10 : null; };
+function pickWeighted(list) {
+  let r = crypto.randomInt(0, list.reduce((s, x) => s + x[1], 0));
+  for (const [name, w] of list) { if (r < w) return name; r -= w; }
+  return list[0][0];
+}
+function spend(userId, amount, reason) {
+  const row = gq.stars.get(userId);
+  if (!row || row.stars < amount) { const e = new Error('Не хватает звёзд'); e.status = 402; throw e; }
+  gq.addStars.run(-amount, userId);
+  gq.log.run(userId, -amount, reason, now());
+}
+function earn(userId, amount, reason) { gq.addStars.run(amount, userId); gq.log.run(userId, amount, reason, now()); }
+function wallet(userId) {
+  const r = gq.stars.get(userId);
+  const next = r.bonus_at + DAILY_EVERY;
+  return { stars: r.stars, daily: DAILY_STARS, canClaim: now() >= next, nextClaimAt: next };
+}
+function giftView(g) {
+  const t = GIFT_BY_ID.get(g.type);
+  const sender = g.sender_id ? q.userById.get(g.sender_id) : null;
+  const owner = q.userById.get(g.owner_id);
+  return {
+    id: g.id, type: g.type, name: t?.name || g.type, createdAt: g.created_at,
+    sender: sender ? publicUser(sender) : null, owner: owner ? publicUser(owner) : null,
+    upgraded: !!g.upgraded_at, upgradedAt: g.upgraded_at || null, serial: g.serial || null, supply: t?.supply || null,
+    model: g.model ? { name: g.model, rarity: rarityOf(MODELS, g.model) } : null,
+    backdrop: g.backdrop ? { name: g.backdrop, rarity: rarityOf(BACKDROPS, g.backdrop) } : null,
+    symbol: g.symbol ? { name: g.symbol, rarity: rarityOf(SYMBOLS, g.symbol) } : null,
+    hidden: !!g.hidden, converted: !!g.converted,
+    price: t?.price || 0, upgradePrice: t?.upgrade || 0, convertValue: Math.floor((t?.price || 0) * 0.85),
+  };
+}
+function walletPush(userId) { sendTo(userId, { type: 'wallet', wallet: wallet(userId) }); }
+function directChatId(a, b) {
+  const ids = [a, b].sort((x, y) => x - y);
+  const key = ids.join(':');
+  let chat = q.chatByDirectKey.get(key);
+  if (!chat) {
+    const info = q.insertChat.run('direct', null, key, a, now());
+    for (const id of new Set(ids)) q.insertMember.run(info.lastInsertRowid, id, now());
+    chat = q.chatById.get(info.lastInsertRowid);
+  }
+  return chat.id;
+}
+function giftMessage(chatId, senderId, giftId, type, action) {
+  const info = q.insertMessage.run(chatId, senderId, 'gift', JSON.stringify({ giftId, type, action }), now());
+  return q.messageById.get(info.lastInsertRowid);
+}
+function deliver(chatId, msgRow) {
+  const msg = messageView(msgRow);
+  for (const { user_id } of q.memberIds.all(chatId)) {
+    const c = fullChat(chatId, user_id);
+    if (c) sendTo(user_id, { type: 'chat', chat: c });
+    sendTo(user_id, { type: 'message', message: msg });
+  }
+  return msg;
+}
+const giftFail = (res, e) => (e.status ? fail(res, e.status, e.message) : (console.error(e), fail(res, 500, 'Ошибка сервера')));
+
+app.get('/api/gifts/catalog', auth, (req, res) => {
+  const sold = new Map(gq.sold.all().map((r) => [r.type, r.n]));
+  res.json({
+    gifts: GIFTS.map((g) => ({ ...g, sold: sold.get(g.id) || 0, left: g.supply ? Math.max(0, g.supply - (sold.get(g.id) || 0)) : null })),
+    models: MODELS.map(([n, w]) => ({ name: n, rarity: w / 10 })), backdrops: BACKDROPS.map(([n, w]) => ({ name: n, rarity: w / 10 })),
+    symbols: SYMBOLS.map(([n, w]) => ({ name: n, rarity: w / 10 })),
+  });
+});
+app.get('/api/wallet', auth, (req, res) => res.json({ ...wallet(req.user.id), history: gq.history.all(req.user.id) }));
+app.post('/api/wallet/daily', auth, (req, res) => {
+  const w = wallet(req.user.id);
+  if (!w.canClaim) return fail(res, 429, 'Бонус уже получен, загляните позже');
+  db.transaction(() => { earn(req.user.id, DAILY_STARS, 'Ежедневный бонус'); gq.setBonus.run(now(), req.user.id); })();
+  res.json(wallet(req.user.id));
+});
+app.post('/api/gifts/send', auth, json, (req, res) => {
+  if (rateLimited('gift:' + req.user.id, 60)) return fail(res, 429, 'Слишком часто, подождите');
+  const t = GIFT_BY_ID.get(String(req.body?.type || ''));
+  const to = q.userById.get(Number(req.body?.userId));
+  if (!t) return fail(res, 400, 'Такого подарка нет');
+  if (!to) return fail(res, 404, 'Пользователь не найден');
+  if (to.id === req.user.id) return fail(res, 400, 'Себе подарок отправить нельзя');
+  let giftId, chatId, msgRow;
+  try {
+    db.transaction(() => {
+      if (t.supply && gq.soldOf.get(t.id).n >= t.supply) { const e = new Error('Этот подарок закончился'); e.status = 409; throw e; }
+      spend(req.user.id, t.price, `Подарок «${t.name}» для ${to.display_name}`);
+      giftId = gq.insert.run(t.id, req.user.id, to.id, now()).lastInsertRowid;
+      chatId = directChatId(req.user.id, to.id);
+      msgRow = giftMessage(chatId, req.user.id, giftId, t.id, 'sent');
+    })();
+  } catch (e) { return giftFail(res, e); }
+  const message = deliver(chatId, msgRow);
+  walletPush(req.user.id);
+  res.json({ gift: giftView(gq.byId.get(giftId)), chatId, message, wallet: wallet(req.user.id) });
+});
+app.get('/api/users/:id/gifts', auth, (req, res) => {
+  const id = Number(req.params.id);
+  const mine = id === req.user.id;
+  res.json({ gifts: gq.ofUser.all(id).filter((g) => mine || !g.hidden).map(giftView) });
+});
+app.get('/api/gifts/:id', auth, (req, res) => {
+  const g = gq.byId.get(Number(req.params.id));
+  if (!g || (g.hidden && g.owner_id !== req.user.id && g.sender_id !== req.user.id)) return fail(res, 404, 'Подарок не найден');
+  res.json({ gift: giftView(g) });
+});
+function ownGift(req, res) {
+  const g = gq.byId.get(Number(req.params.id));
+  if (!g || g.owner_id !== req.user.id || g.converted) { fail(res, 404, 'Подарок не найден'); return null; }
+  return g;
+}
+app.post('/api/gifts/:id/upgrade', auth, (req, res) => {
+  const g = ownGift(req, res); if (!g) return;
+  if (g.upgraded_at) return fail(res, 400, 'Подарок уже коллекционный');
+  const t = GIFT_BY_ID.get(g.type);
+  try {
+    db.transaction(() => {
+      spend(req.user.id, t.upgrade, `Улучшение «${t.name}»`);
+      gq.upgrade.run(now(), gq.upgradedOf.get(g.type).n + 1, pickWeighted(MODELS), pickWeighted(BACKDROPS), pickWeighted(SYMBOLS), g.id);
+    })();
+  } catch (e) { return giftFail(res, e); }
+  walletPush(req.user.id);
+  res.json({ gift: giftView(gq.byId.get(g.id)), wallet: wallet(req.user.id) });
+});
+app.post('/api/gifts/:id/convert', auth, (req, res) => {
+  const g = ownGift(req, res); if (!g) return;
+  if (g.upgraded_at) return fail(res, 400, 'Коллекционный подарок нельзя обменять');
+  const v = giftView(g);
+  db.transaction(() => { gq.convert.run(g.id); earn(req.user.id, v.convertValue, `Обмен подарка «${v.name}»`); })();
+  walletPush(req.user.id);
+  res.json({ ok: true, wallet: wallet(req.user.id) });
+});
+app.post('/api/gifts/:id/transfer', auth, json, (req, res) => {
+  const g = ownGift(req, res); if (!g) return;
+  if (!g.upgraded_at) return fail(res, 400, 'Передавать можно только коллекционные подарки — сначала улучшите его');
+  const to = q.userById.get(Number(req.body?.userId));
+  if (!to || to.id === req.user.id) return fail(res, 400, 'Выберите получателя');
+  let chatId, msgRow;
+  db.transaction(() => {
+    gq.transfer.run(to.id, g.id);
+    chatId = directChatId(req.user.id, to.id);
+    msgRow = giftMessage(chatId, req.user.id, g.id, g.type, 'transfer');
+  })();
+  deliver(chatId, msgRow);
+  res.json({ gift: giftView(gq.byId.get(g.id)), chatId });
+});
+app.post('/api/gifts/:id/hide', auth, json, (req, res) => {
+  const g = ownGift(req, res); if (!g) return;
+  gq.hide.run(req.body?.hidden ? 1 : 0, g.id);
+  res.json({ gift: giftView(gq.byId.get(g.id)) });
+});
+
 app.use('/api', (err, req, res, next) => {
   if (err.type === 'entity.too.large') return fail(res, 413, 'Файл слишком большой');
   console.error(err);
