@@ -120,9 +120,18 @@ OK=""
 if [ -n "${FXTUNNEL_TOKEN:-}" ]; then
   # fxTunnel — российский сервис, работает без VPN
   FXBIN="$HOME/.local/bin/fxtunnel"
+  [ -x "$FXBIN" ] || FXBIN="$RT/fxtunnel"
   if [ ! -x "$FXBIN" ]; then
     say "Скачиваю fxTunnel"
-    curl -fsSL https://fxtun.ru/install.sh | sh || die "не удалось установить fxTunnel"
+    if curl -fsSL https://fxtun.ru/install.sh | sh && [ -x "$HOME/.local/bin/fxtunnel" ]; then
+      FXBIN="$HOME/.local/bin/fxtunnel"
+    else
+      # официальный установщик иногда отказывается (нет подписи у свежей сборки) — берём файл напрямую с fxtun.ru
+      echo "Установщик не сработал, скачиваю fxTunnel напрямую с fxtun.ru"
+      curl -fsSL -o "$RT/fxtunnel.tmp" "https://fxtun.ru/api/downloads/cli-linux-$CF_ARCH" || die "не удалось скачать fxTunnel"
+      chmod +x "$RT/fxtunnel.tmp" && "$RT/fxtunnel.tmp" version >/dev/null 2>&1 || die "скачанный fxTunnel не запускается"
+      mv "$RT/fxtunnel.tmp" "$RT/fxtunnel"; FXBIN="$RT/fxtunnel"
+    fi
   fi
   SUB="$(printf '%s' "${FXTUNNEL_SUBDOMAIN:-}" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9-' | cut -c1-32)"
   if [ -z "$SUB" ]; then
