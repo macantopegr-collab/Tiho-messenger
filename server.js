@@ -109,6 +109,16 @@ CREATE TABLE IF NOT EXISTS files (
   if (!ccols.has('pinned_id')) db.exec('ALTER TABLE chats ADD COLUMN pinned_id INTEGER');
   const mbcols = new Set(db.prepare('PRAGMA table_info(members)').all().map((c) => c.name));
   if (!mbcols.has('archived')) db.exec('ALTER TABLE members ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
+  if (!mbcols.has('role')) {
+    db.exec("ALTER TABLE members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'");
+    db.exec("UPDATE members SET role = 'owner' WHERE EXISTS (SELECT 1 FROM chats c WHERE c.id = members.chat_id AND c.type = 'group' AND c.created_by = members.user_id)");
+  }
+  if (!ccols.has('perms')) db.exec("ALTER TABLE chats ADD COLUMN perms TEXT NOT NULL DEFAULT '{}'");
+  db.exec(`CREATE TABLE IF NOT EXISTS invites (
+    code TEXT PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE, created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0, max_uses INTEGER NOT NULL DEFAULT 0, uses INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0);
+  CREATE TABLE IF NOT EXISTS chat_bans (chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (chat_id, user_id));`);
   if (!mbcols.has('muted_until')) db.exec('ALTER TABLE members ADD COLUMN muted_until INTEGER NOT NULL DEFAULT 0');
   db.exec(`CREATE TABLE IF NOT EXISTS scheduled (
     id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -179,7 +189,7 @@ const q = {
   insertMember: db.prepare('INSERT OR IGNORE INTO members (chat_id, user_id, joined_at) VALUES (?, ?, ?)'),
   deleteMember: db.prepare('DELETE FROM members WHERE chat_id = ? AND user_id = ?'),
   isMember: db.prepare('SELECT 1 FROM members WHERE chat_id = ? AND user_id = ?'),
-  chatMembers: db.prepare(`SELECT u.id, u.username, u.display_name, u.public_key, u.color, u.bio, u.avatar, u.last_seen, m.last_read_id
+  chatMembers: db.prepare(`SELECT u.id, u.username, u.display_name, u.public_key, u.color, u.bio, u.avatar, u.last_seen, m.last_read_id, m.role
                            FROM members m JOIN users u ON u.id = m.user_id WHERE m.chat_id = ? ORDER BY u.id`),
   memberIds: db.prepare('SELECT user_id FROM members WHERE chat_id = ?'),
   myChats: db.prepare(`SELECT c.*, m.last_read_id, m.archived, m.muted_until,
@@ -301,7 +311,7 @@ const cookie = {
 };
 const publicUser = (u) => ({ id: u.id, username: u.username, displayName: u.display_name, color: u.color,
   bio: u.bio || '', avatar: u.avatar || 0, lastSeen: u.last_seen || 0, online: online.has(u.id) });
-const memberView = (m) => ({ ...publicUser(m), publicKey: m.public_key, lastReadId: m.last_read_id });
+const memberView = (m) => ({ ...publicUser(m), publicKey: m.public_key, lastReadId: m.last_read_id, role: m.role || 'member' });
 const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
 function reactionsFor(ids) {
   const out = new Map();
@@ -338,6 +348,7 @@ function chatView(chat, userId) {
     mutedUntil: chat.muted_until > now() ? chat.muted_until : 0,
     scheduled: chat.scheduled_count || 0,
     groupCall: chat.type === 'group' ? roomView(rooms.get(chat.id)) : null,
+    perms: chat.type === 'group' ? groupPerms(chat) : null,
     blocked: chat.type === 'direct' ? blockState(userId, members.find((m) => m.id !== userId)?.id) : null,
     unread: chat.unread ?? 0, mentions: chat.mentions ?? 0, lastReadId: chat.last_read_id ?? members.find((m) => m.id === userId)?.lastReadId ?? 0,
   };
@@ -832,6 +843,7 @@ app.post('/api/chats/group', auth, json, (req, res) => {
   db.transaction(() => {
     chatId = q.insertChat.run('group', title, null, req.user.id, now()).lastInsertRowid;
     q.insertMember.run(chatId, req.user.id, now());
+    db.prepare("UPDATE members SET role = 'owner' WHERE chat_id = ? AND user_id = ?").run(chatId, req.user.id);
     for (const id of valid) q.insertMember.run(chatId, id, now());
     addSystem(chatId, `${req.user.display_name} создал(а) группу «${title}»`);
   })();
@@ -848,12 +860,16 @@ function requireMember(req, res) {
 app.post('/api/chats/:id/members', auth, json, (req, res) => {
   const chat = requireMember(req, res); if (!chat) return;
   if (chat.type !== 'group') return fail(res, 400, 'Добавлять участников можно только в группу');
+  if (groupPerms(chat).add === 'admins' && !isGroupAdmin(chat.id, req.user.id)) return fail(res, 403, 'Добавлять участников могут только админы');
   const ids = Array.isArray(req.body?.userIds) ? req.body.userIds.map(Number) : [];
   const added = [];
   db.transaction(() => {
     for (const id of new Set(ids)) {
       const u = q.userById.get(id);
-      if (u && !q.isMember.get(chat.id, id) && !blockedBy(id, req.user.id)) { q.insertMember.run(chat.id, id, now()); added.push(u); }
+      if (u && !q.isMember.get(chat.id, id) && !blockedBy(id, req.user.id)) {
+        db.prepare('DELETE FROM chat_bans WHERE chat_id = ? AND user_id = ?').run(chat.id, id);
+        q.insertMember.run(chat.id, id, now()); added.push(u);
+      }
     }
     if (added.length) addSystem(chat.id, `${req.user.display_name} добавил(а): ${added.map((u) => u.display_name).join(', ')}`);
   })();
@@ -865,8 +881,16 @@ app.post('/api/chats/:id/leave', auth, (req, res) => {
   const chat = requireMember(req, res); if (!chat) return;
   if (chat.type !== 'group') return fail(res, 400, 'Из личного чата выйти нельзя');
   leaveRoom(chat.id, req.user.id);
+  const wasOwner = memberRole(chat.id, req.user.id) === 'owner';
   q.deleteMember.run(chat.id, req.user.id);
   addSystem(chat.id, `${req.user.display_name} покинул(а) группу`);
+  if (wasOwner) {
+    const heir = db.prepare("SELECT user_id FROM members WHERE chat_id = ? ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END, joined_at LIMIT 1").get(chat.id);
+    if (heir) {
+      db.prepare("UPDATE members SET role = 'owner' WHERE chat_id = ? AND user_id = ?").run(chat.id, heir.user_id);
+      addSystem(chat.id, `${q.userById.get(heir.user_id).display_name} теперь владелец группы`);
+    }
+  }
   q.deleteEmptyChat.run(chat.id, chat.id);
   sendTo(req.user.id, { type: 'chatRemoved', chatId: chat.id });
   if (q.chatById.get(chat.id)) broadcastChat(chat.id);
@@ -892,6 +916,7 @@ app.post('/api/chats/:id/messages', auth, json, (req, res) => {
   const chat = requireMember(req, res); if (!chat) return;
   const env = req.body?.envelope;
   if (!validEnvelope(env)) return fail(res, 400, 'Некорректное зашифрованное сообщение');
+  if (chat.type === 'group' && groupPerms(chat).send === 'admins' && !isGroupAdmin(chat.id, req.user.id)) return fail(res, 403, 'Писать в группу могут только админы');
   if (chat.type === 'direct') {
     const otherId = q.memberIds.all(chat.id).map((r) => r.user_id).find((id) => id !== req.user.id);
     const st = blockState(req.user.id, otherId);
@@ -1047,11 +1072,136 @@ app.post('/api/files/:id/share', auth, json, (req, res) => {
 /* Закреплённое сообщение */
 app.post('/api/chats/:id/pin', auth, json, (req, res) => {
   const chat = requireMember(req, res); if (!chat) return;
+  if (chat.type === 'group' && groupPerms(chat).pin === 'admins' && !isGroupAdmin(chat.id, req.user.id)) return fail(res, 403, 'Закреплять могут только админы');
   const mid = req.body?.messageId ? Number(req.body.messageId) : null;
   if (mid) { const m = q.messageById.get(mid); if (!m || m.chat_id !== chat.id || m.kind === 'deleted') return fail(res, 404, 'Сообщение не найдено'); }
   db.prepare('UPDATE chats SET pinned_id = ? WHERE id = ?').run(mid, chat.id);
   const sys = addSystem(chat.id, mid ? `${req.user.display_name} закрепил(а) сообщение` : `${req.user.display_name} открепил(а) сообщение`);
   for (const { user_id } of q.memberIds.all(chat.id)) sendTo(user_id, { type: 'message', message: messageView(sys) });
+  broadcastChat(chat.id);
+  res.json({ chat: fullChat(chat.id, req.user.id) });
+});
+
+/* ---------- Права в группах ---------- */
+const DEFAULT_PERMS = { send: 'all', add: 'all', pin: 'all', info: 'admins' };
+function groupPerms(chat) { try { return { ...DEFAULT_PERMS, ...JSON.parse(chat.perms || '{}') }; } catch { return { ...DEFAULT_PERMS }; } }
+const memberRole = (chatId, userId) => db.prepare('SELECT role FROM members WHERE chat_id = ? AND user_id = ?').get(chatId, userId)?.role || null;
+const isGroupAdmin = (chatId, userId) => ['owner', 'admin'].includes(memberRole(chatId, userId));
+function requireGroupAdmin(req, res) {
+  const chat = requireMember(req, res); if (!chat) return null;
+  if (chat.type !== 'group') { fail(res, 400, 'Это не группа'); return null; }
+  if (!isGroupAdmin(chat.id, req.user.id)) { fail(res, 403, 'Только для админов группы'); return null; }
+  return chat;
+}
+app.patch('/api/chats/:id', auth, json, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  if (chat.type !== 'group') return fail(res, 400, 'Это не группа');
+  const perms = groupPerms(chat);
+  const admin = isGroupAdmin(chat.id, req.user.id);
+  if (req.body?.title !== undefined) {
+    if (perms.info === 'admins' && !admin) return fail(res, 403, 'Менять название могут только админы');
+    const title = cleanName(req.body.title);
+    if (!title) return fail(res, 400, 'Название не может быть пустым');
+    if (title !== chat.title) {
+      db.prepare('UPDATE chats SET title = ? WHERE id = ?').run(title, chat.id);
+      addSystem(chat.id, `${req.user.display_name} переименовал(а) группу в «${title}»`);
+    }
+  }
+  if (req.body?.perms && typeof req.body.perms === 'object') {
+    if (!admin) return fail(res, 403, 'Менять права могут только админы');
+    const next = { ...perms };
+    for (const k of Object.keys(DEFAULT_PERMS)) if (['all', 'admins'].includes(req.body.perms[k])) next[k] = req.body.perms[k];
+    db.prepare('UPDATE chats SET perms = ? WHERE id = ?').run(JSON.stringify(next), chat.id);
+    if (next.send !== perms.send) addSystem(chat.id, next.send === 'admins' ? `${req.user.display_name} разрешил(а) писать только админам` : `${req.user.display_name} разрешил(а) писать всем`);
+  }
+  broadcastChat(chat.id);
+  res.json({ chat: fullChat(chat.id, req.user.id) });
+});
+app.post('/api/chats/:id/role', auth, json, (req, res) => {
+  const chat = requireGroupAdmin(req, res); if (!chat) return;
+  if (memberRole(chat.id, req.user.id) !== 'owner') return fail(res, 403, 'Назначать админов может только владелец');
+  const uid = Number(req.body?.userId);
+  const role = req.body?.role === 'admin' ? 'admin' : req.body?.role === 'owner' ? 'owner' : 'member';
+  const cur = memberRole(chat.id, uid);
+  if (!cur || uid === req.user.id) return fail(res, 400, 'Нельзя');
+  const u = q.userById.get(uid);
+  db.transaction(() => {
+    if (role === 'owner') {
+      db.prepare("UPDATE members SET role = 'admin' WHERE chat_id = ? AND user_id = ?").run(chat.id, req.user.id);
+      addSystem(chat.id, `${req.user.display_name} передал(а) группу: теперь владелец ${u.display_name}`);
+    } else if (role !== cur) addSystem(chat.id, role === 'admin' ? `${u.display_name} теперь админ` : `${u.display_name} больше не админ`);
+    db.prepare('UPDATE members SET role = ? WHERE chat_id = ? AND user_id = ?').run(role, chat.id, uid);
+  })();
+  broadcastChat(chat.id);
+  res.json({ chat: fullChat(chat.id, req.user.id) });
+});
+app.delete('/api/chats/:id/members/:uid', auth, (req, res) => {
+  const chat = requireGroupAdmin(req, res); if (!chat) return;
+  const uid = Number(req.params.uid);
+  const target = memberRole(chat.id, uid);
+  const mine = memberRole(chat.id, req.user.id);
+  if (!target || uid === req.user.id) return fail(res, 404, 'Участник не найден');
+  if (target === 'owner' || (target === 'admin' && mine !== 'owner')) return fail(res, 403, 'Удалить админа может только владелец');
+  const u = q.userById.get(uid);
+  leaveRoom(chat.id, uid);
+  q.deleteMember.run(chat.id, uid);
+  db.prepare('INSERT OR IGNORE INTO chat_bans (chat_id, user_id) VALUES (?, ?)').run(chat.id, uid);
+  addSystem(chat.id, `${req.user.display_name} удалил(а) ${u.display_name} из группы`);
+  sendTo(uid, { type: 'chatRemoved', chatId: chat.id, kicked: chat.title });
+  broadcastChat(chat.id);
+  res.json({ chat: fullChat(chat.id, req.user.id) });
+});
+
+/* ---------- Ссылки-приглашения ---------- */
+const inviteView = (r) => ({ code: r.code, createdAt: r.created_at, expiresAt: r.expires_at, maxUses: r.max_uses, uses: r.uses,
+  active: !r.revoked && (!r.expires_at || r.expires_at > now()) && (!r.max_uses || r.uses < r.max_uses), revoked: !!r.revoked,
+  by: q.userById.get(r.created_by)?.display_name || '' });
+app.get('/api/chats/:id/invites', auth, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  if (chat.type !== 'group') return fail(res, 400, 'Это не группа');
+  if (groupPerms(chat).add === 'admins' && !isGroupAdmin(chat.id, req.user.id)) return fail(res, 403, 'Только для админов группы');
+  res.json({ invites: db.prepare('SELECT * FROM invites WHERE chat_id = ? AND revoked = 0 ORDER BY created_at DESC LIMIT 50').all(chat.id).map(inviteView) });
+});
+app.post('/api/chats/:id/invites', auth, json, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  if (chat.type !== 'group') return fail(res, 400, 'Это не группа');
+  if (groupPerms(chat).add === 'admins' && !isGroupAdmin(chat.id, req.user.id)) return fail(res, 403, 'Создавать ссылки могут только админы');
+  if (rateLimited('invite:' + req.user.id, 30, 3600000)) return fail(res, 429, 'Слишком много ссылок, подождите');
+  const ttl = Math.max(0, Math.min(Number(req.body?.expiresIn) || 0, 366 * 86400000));
+  const max = Math.max(0, Math.min(Number(req.body?.maxUses) || 0, 100000));
+  const code = crypto.randomBytes(9).toString('base64url');
+  db.prepare('INSERT INTO invites (code, chat_id, created_by, created_at, expires_at, max_uses) VALUES (?, ?, ?, ?, ?, ?)').run(code, chat.id, req.user.id, now(), ttl ? now() + ttl : 0, max);
+  res.json({ invite: inviteView(db.prepare('SELECT * FROM invites WHERE code = ?').get(code)) });
+});
+app.delete('/api/invites/:code', auth, (req, res) => {
+  const r = db.prepare('SELECT * FROM invites WHERE code = ?').get(String(req.params.code));
+  if (!r || !q.isMember.get(r.chat_id, req.user.id) || (r.created_by !== req.user.id && !isGroupAdmin(r.chat_id, req.user.id))) return fail(res, 404, 'Ссылка не найдена');
+  db.prepare('UPDATE invites SET revoked = 1 WHERE code = ?').run(r.code);
+  res.json({ ok: true });
+});
+function inviteFor(req, res) {
+  if (rateLimited('invite-use:' + req.user.id, 60, 600000)) { fail(res, 429, 'Слишком часто'); return null; }
+  const r = db.prepare('SELECT * FROM invites WHERE code = ?').get(String(req.params.code));
+  const chat = r && q.chatById.get(r.chat_id);
+  if (!r || !chat || !inviteView(r).active) { fail(res, 404, 'Ссылка недействительна или устарела'); return null; }
+  return { r, chat };
+}
+app.get('/api/invites/:code', auth, (req, res) => {
+  const x = inviteFor(req, res); if (!x) return;
+  const members = q.memberIds.all(x.chat.id).length;
+  res.json({ chat: { id: x.chat.id, title: x.chat.title, members }, member: !!q.isMember.get(x.chat.id, req.user.id) });
+});
+app.post('/api/invites/:code/join', auth, (req, res) => {
+  const x = inviteFor(req, res); if (!x) return;
+  const { chat, r } = x;
+  if (q.isMember.get(chat.id, req.user.id)) return res.json({ chat: fullChat(chat.id, req.user.id) });
+  if (db.prepare('SELECT 1 FROM chat_bans WHERE chat_id = ? AND user_id = ?').get(chat.id, req.user.id)) return fail(res, 403, 'Вас удалили из этой группы — вернуть может только админ');
+  if (q.memberIds.all(chat.id).length >= 200) return fail(res, 400, 'В группе уже 200 участников');
+  db.transaction(() => {
+    q.insertMember.run(chat.id, req.user.id, now());
+    db.prepare('UPDATE invites SET uses = uses + 1 WHERE code = ?').run(r.code);
+    addSystem(chat.id, `${req.user.display_name} вступил(а) по ссылке`);
+  })();
   broadcastChat(chat.id);
   res.json({ chat: fullChat(chat.id, req.user.id) });
 });

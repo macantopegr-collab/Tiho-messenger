@@ -265,6 +265,10 @@
   /* ---------- чаты: помощники ---------- */
   const other = (chat) => chat.members.find((m) => m.id !== S.me.id) || chat.members[0];
   /* «Избранное» — личный чат с самим собой */
+  const myRole = (chat) => chat?.members.find((m) => m.id === S.me.id)?.role || 'member';
+  const isAdminOf = (chat) => chat?.type === 'group' && ['owner', 'admin'].includes(myRole(chat));
+  const allowed = (chat, what) => !chat || chat.type !== 'group' || (chat.perms?.[what] || 'all') !== 'admins' || isAdminOf(chat);
+  const ROLE_NAME = { owner: 'владелец', admin: 'админ' };
   const isSaved = (chat) => !!chat && chat.type === 'direct' && chat.members.length === 1 && chat.members[0].id === S.me.id;
   const chatTitle = (chat) => chat.type === 'group' ? chat.title : isSaved(chat) ? 'Избранное' : (other(chat)?.displayName || 'Чат');
   function avatar(chat, size = 52) {
@@ -1033,6 +1037,8 @@
   }
   /* Открыли ссылку вида /@username — сразу открываем чат с этим человеком */
   async function openFromLink() {
+    const jm = /^\/j\/([A-Za-z0-9_-]{6,40})\/?$/.exec(location.pathname);
+    if (jm) { history.replaceState(null, '', '/'); return joinByInvite(jm[1]); }
     const cm = /^\/c\/([a-zA-Z0-9_]{4,32})\/?$/.exec(location.pathname);
     if (cm) {
       history.replaceState(null, '', '/');
@@ -1169,7 +1175,7 @@
 
   function renderPane() {
     const pane = clear(S.refs.pane);
-    if (S.page) { S.refs.msgs = null; S.refs.head = null; return renderPage(pane); }
+    if (S.page) { S.refs.msgs = null; S.refs.head = null; S.refs.inner = null; S.refs.composer = null; return renderPage(pane); }
     if (S.channel != null && S.channels.has(S.channel)) return renderChannel(pane);
     const chat = S.chats.get(S.active);
     if (!chat) {
@@ -1190,7 +1196,7 @@
     const down = h('button', { class: 'to-bottom', 'aria-label': 'К последним сообщениям', onclick: () => {
       msgs.scrollTo({ top: msgs.scrollHeight, behavior: 'smooth' });
     } }, icon('down', 24), downBadge);
-    const composer = chat.blocked ? blockedBar(chat) : buildComposer(chat);
+    const composer = chat.blocked ? blockedBar(chat) : !allowed(chat, 'send') ? readOnlyBar() : buildComposer(chat);
     const pinBox = h('div');
     pane.append(head, pinBox, keyWarnBox, h('div', { class: 'msgs-wrap' }, msgs, down), composer.el);
     Object.assign(S.refs, { head, keyWarnBox, msgs, inner, typingRow, composer, down, downBadge, pinBox });
@@ -1202,6 +1208,9 @@
     renderPinned();
     renderMessages('bottom');
     if (!COARSE) composer.input?.focus();
+  }
+  function readOnlyBar() {
+    return { el: h('div', { class: 'blocked-bar' }, h('span', null, icon('lock', 18), 'Писать могут только админы группы')), input: null, replyBox: h('div'), uploadBox: h('div'), syncBtn() {}, autosize() {} };
   }
   function blockedBar(chat) {
     const o = other(chat);
@@ -1259,8 +1268,9 @@
     const actions = isGroup
       ? h('div', { class: 'pg-actions' },
         action('chat', 'Написать', () => openChat(chat.id)),
-        action('plus', 'Добавить', () => openPicker('add', chat.id)),
-        action('shield', 'Шифрование', () => openInfo(chat.id)),
+        allowed(chat, 'add') ? action('plus', 'Добавить', () => openPicker('add', chat.id)) : null,
+        allowed(chat, 'add') ? action('link', 'Ссылка', () => openInvites(chat)) : null,
+        isAdminOf(chat) ? action('edit', 'Настройки', () => openGroupSettings(chat)) : action('shield', 'Шифрование', () => openInfo(chat.id)),
         action('leave', 'Выйти', async () => {
           if (!confirm(`Покинуть группу «${chat.title}»?`)) return;
           try { await api(`/api/chats/${chat.id}/leave`, { method: 'POST' }); closePage(); } catch (e) { toast(e.message); }
@@ -1315,9 +1325,10 @@
       if (isGroup) {
         body.querySelector('.pg-members')?.remove();
         body.append(h('div', { class: 'section pg-members' }, h('div', { class: 'section-title' }, 'Участники'),
-          h('div', { class: 'card' }, chat.members.map((m) => h(m.id === S.me.id ? 'div' : 'button', {
-            class: 'card-row', onclick: m.id === S.me.id ? null : () => openPage({ type: 'contact', userId: m.id, user: m }) },
-          userAvatar(m, 40, true), h('span', { class: 'grow' }, h('b', null, m.displayName + (m.id === S.me.id ? ' (вы)' : '')), h('small', null, seenText(m))))))));
+          h('div', { class: 'card' }, [...chat.members].sort((x, y) => ({ owner: 0, admin: 1 }[x.role] ?? 2) - ({ owner: 0, admin: 1 }[y.role] ?? 2)).map((m) => h(m.id === S.me.id ? 'div' : 'button', {
+            class: 'card-row', onclick: m.id === S.me.id ? null : (e) => memberMenu(chat, m, e) },
+          userAvatar(m, 40, true), h('span', { class: 'grow' }, h('b', null, m.displayName + (m.id === S.me.id ? ' (вы)' : '')), h('small', null, seenText(m))),
+          ROLE_NAME[m.role] ? h('span', { class: 'role-tag' + (m.role === 'owner' ? ' owner' : '') }, ROLE_NAME[m.role]) : null)))));
       }
     };
     fill();
@@ -1378,7 +1389,7 @@
   function renderMessages(scroll) {
     const chat = S.chats.get(S.active);
     const { msgs, inner, typingRow } = S.refs;
-    if (!chat || !inner) return;
+    if (!chat || !inner || !msgs || !inner.isConnected) return;
     const atBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 120;
     const prevH = msgs.scrollHeight, prevTop = msgs.scrollTop;
     clear(inner);
@@ -1505,7 +1516,7 @@
         p.t === 'file' && p.caption && ['copy', 'Копировать подпись', () => copyText(p.caption)],
         ['forward', 'Переслать', () => forwardMessage(m, p, senderName)],
         !isSaved(chat) && ['bookmark', 'В избранное', () => saveToFavorites(m, p, senderName)],
-        chat.pinned?.id === m.id ? ['pin', 'Открепить', () => pinMessage(chat, null)] : ['pin', 'Закрепить', () => pinMessage(chat, m)],
+        allowed(chat, 'pin') && (chat.pinned?.id === m.id ? ['pin', 'Открепить', () => pinMessage(chat, null)] : ['pin', 'Закрепить', () => pinMessage(chat, m)]),
         mine && p.t === 'text' && ['edit', 'Изменить', () => setEdit(m, p)],
         mine && ['trash', 'Удалить у всех', () => deleteMessage(m, p), 'danger'],
         !mine && ['flag', 'Пожаловаться', () => openReport({ kind: 'message', targetId: m.id, user: sender, evidence: reportText(p) }), 'danger'],
@@ -2261,7 +2272,8 @@
       if (d.chat.lastMessage) await decryptMsg(d.chat.lastMessage, d.chat);
       if (old && S.active === d.chat.id) { d.chat.unread = 0; }
       if (old && old.members.length !== d.chat.members.length) S.userKeys.clear();
-      if (S.active === d.chat.id && old && (old.blocked || null) !== (d.chat.blocked || null)) { renderList(); renderPane(); return; }
+      if (S.active === d.chat.id && old && ((old.blocked || null) !== (d.chat.blocked || null) || allowed(old, 'send') !== allowed(d.chat, 'send'))) { renderList(); renderPane(); return; }
+      if (S.page?.chatId === d.chat.id) renderPane();
       if (S.active === d.chat.id) {
         renderPinned();
         const box = S.msgs.get(d.chat.id);
@@ -2310,6 +2322,8 @@
     if (d.type === 'wallet') { S.wallet = { ...(S.wallet || {}), ...d.wallet }; if (S.tab === 'profile') renderProfileTab(); return; }
     if (d.type === 'reactions') return applyReactions(d.chatId, d.messageId, d.reactions);
     if (d.type === 'chatRemoved') {
+      if (d.kicked) toast(`Вас удалили из группы «${d.kicked}»`);
+      if (S.page?.chatId === d.chatId) closePage();
       S.chats.delete(d.chatId); S.msgs.delete(d.chatId);
       if (S.active === d.chatId) closeChat(); else renderList();
       return;
@@ -3909,6 +3923,93 @@
       if (i < n.length) out.push(n.slice(i));
     }
     return out;
+  }
+
+  /* ---------- Группы: участники, права, ссылки ---------- */
+  function memberMenu(chat, m, e) {
+    const mine = myRole(chat);
+    const r = e.currentTarget.getBoundingClientRect();
+    const items = [['user', 'Профиль', () => openPage({ type: 'contact', userId: m.id, user: m })], ['chat', 'Написать', () => openDirect(m.id)]];
+    const call = (fn) => async () => { try { const { chat: c } = await fn(); S.chats.set(c.id, { ...S.chats.get(c.id), ...c }); renderPane(); } catch (err) { toast(err.message); } };
+    if (mine === 'owner' && m.role !== 'owner') {
+      items.push(m.role === 'admin' ? ['shield', 'Снять админа', call(() => api(`/api/chats/${chat.id}/role`, { body: { userId: m.id, role: 'member' } }))]
+        : ['shield', 'Сделать админом', call(() => api(`/api/chats/${chat.id}/role`, { body: { userId: m.id, role: 'admin' } }))]);
+      items.push(['swap', 'Передать владение', () => { if (confirm(`Сделать ${m.displayName} владельцем? Вы останетесь админом.`)) call(() => api(`/api/chats/${chat.id}/role`, { body: { userId: m.id, role: 'owner' } }))(); }]);
+    }
+    if ((mine === 'owner' && m.role !== 'owner') || (mine === 'admin' && m.role === 'member')) {
+      items.push(['leave', 'Удалить из группы', () => { if (confirm(`Удалить ${m.displayName} из группы? Вернуться по ссылке он не сможет.`)) call(() => api(`/api/chats/${chat.id}/members/${m.id}`, { method: 'DELETE' }))(); }, 'danger']);
+    }
+    openMenu(r.left + 40, r.bottom - 10, items);
+  }
+  function openGroupSettings(chat) {
+    const title = h('input', { class: 'input', value: chat.title, maxlength: 64 });
+    const perms = { ...(chat.perms || {}) };
+    const sw = (key, label, sub) => {
+      const b = h('button', { class: 'sw', role: 'switch', 'aria-checked': String(perms[key] === 'admins'), 'aria-label': label,
+        onclick: () => { perms[key] = perms[key] === 'admins' ? 'all' : 'admins'; b.setAttribute('aria-checked', String(perms[key] === 'admins')); } });
+      return h('div', { class: 'card-row' }, h('span', { class: 'grow' }, h('b', null, label), h('small', null, sub)), b);
+    };
+    const close = modal('Настройки группы', [
+      h('label', { class: 'field-label' }, 'Название', title),
+      h('div', { class: 'section-title' }, 'Только админы могут'),
+      h('div', { class: 'card' },
+        sw('send', 'Писать сообщения', 'Остальные только читают — как канал'),
+        sw('add', 'Добавлять участников', 'И создавать ссылки-приглашения'),
+        sw('pin', 'Закреплять сообщения', ''),
+        sw('info', 'Менять название', '')),
+      h('button', { class: 'btn block', onclick: async () => {
+        try { const { chat: c } = await api('/api/chats/' + chat.id, { method: 'PATCH', body: { title: title.value, perms } }); S.chats.set(c.id, { ...S.chats.get(c.id), ...c }); close(); renderList(); renderPane(); toast('Сохранено'); }
+        catch (e) { toast(e.message); }
+      } }, 'Сохранить'),
+      h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Назначить админа или удалить участника: нажмите на человека в списке участников.'),
+    ]);
+  }
+  const inviteLink = (code) => `${location.origin}/j/${code}`;
+  async function openInvites(chat) {
+    let list = [];
+    try { ({ invites: list } = await api(`/api/chats/${chat.id}/invites`)); } catch (e) { return toast(e.message); }
+    let ttl = 7 * 86400000, max = 0;
+    const seg = (opts, cur, set) => {
+      const el = h('div', { class: 'theme-seg' }, opts.map(([v, l]) => h('button', { 'aria-pressed': String(v === cur), onclick: (e) => {
+        set(v); el.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === e.currentTarget)));
+      } }, l)));
+      return el;
+    };
+    const share = async (url) => {
+      if (navigator.share && COARSE) { try { await navigator.share({ title: chat.title, text: `Вступай в группу «${chat.title}» в «Тихо»`, url }); return; } catch { /* отменили */ } }
+      copyText(url);
+    };
+    const row = (v) => h('div', { class: 'card invite-row' + (v.active ? '' : ' dead') },
+      h('div', { class: 'invite-link' }, h('code', null, inviteLink(v.code).replace(/^https?:\/\//, '')),
+        h('button', { class: 'icon-btn', 'aria-label': 'Поделиться ссылкой', onclick: () => share(inviteLink(v.code)) }, icon('link', 18)),
+        h('button', { class: 'icon-btn', 'aria-label': 'Отозвать ссылку', onclick: async () => { try { await api('/api/invites/' + v.code, { method: 'DELETE' }); close(); openInvites(chat); toast('Ссылка отозвана'); } catch (e) { toast(e.message); } } }, icon('trash', 18))),
+      h('small', { class: 'muted' }, [v.active ? null : 'не действует', `вступили: ${v.uses}${v.maxUses ? ' из ' + v.maxUses : ''}`,
+        v.expiresAt ? 'до ' + new Date(v.expiresAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) : 'бессрочно', v.by].filter(Boolean).join(' · ')));
+    const close = modal('Ссылки-приглашения', [
+      h('div', { class: 'section-title' }, 'Новая ссылка'),
+      h('div', { class: 'field-label' }, 'Срок', seg([[86400000, '1 день'], [7 * 86400000, 'Неделя'], [0, 'Бессрочно']], ttl, (v) => { ttl = v; })),
+      h('div', { class: 'field-label' }, 'Сколько человек', seg([[1, '1'], [10, '10'], [100, '100'], [0, 'Без лимита']], max, (v) => { max = v; })),
+      h('button', { class: 'btn block', onclick: async () => {
+        try { const { invite } = await api(`/api/chats/${chat.id}/invites`, { body: { expiresIn: ttl, maxUses: max } }); close(); await openInvites(chat); share(inviteLink(invite.code)); }
+        catch (e) { toast(e.message); }
+      } }, icon('plus', 18), 'Создать ссылку'),
+      list.length ? h('div', { class: 'section-title' }, `Активные ссылки · ${list.filter((v) => v.active).length}`) : null,
+      list.length ? h('div', { class: 'invite-list' }, list.map(row)) : null,
+      h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Кто вступит по ссылке, увидит только новые сообщения: старые зашифрованы не для него.'),
+    ].filter(Boolean));
+  }
+  async function joinByInvite(code) {
+    let info;
+    try { info = await api('/api/invites/' + encodeURIComponent(code)); } catch (e) { return toast(e.message); }
+    if (info.member) { const c = S.chats.get(info.chat.id); if (c) openChat(c.id); return; }
+    const close = modal('Приглашение в группу', [
+      h('div', { class: 'pg-hero' }, h('div', { class: 'av', style: `width:88px;height:88px;font-size:30px;border-radius:28px;background:${AV_COLORS[info.chat.id % 8]}` }, initials(info.chat.title)),
+        h('h2', null, info.chat.title), h('span', { class: 'muted' }, `${info.chat.members} ${plural(info.chat.members, 'участник', 'участника', 'участников')}`)),
+      h('button', { class: 'btn block big', onclick: async () => {
+        try { const { chat } = await api(`/api/invites/${encodeURIComponent(code)}/join`, { method: 'POST' }); S.chats.set(chat.id, chat); checkKeys(chat); close(); renderList(); openChat(chat.id); }
+        catch (e) { toast(e.message); }
+      } }, 'Вступить в группу'),
+    ]);
   }
 
   /* ---------- Отложенные сообщения ---------- */

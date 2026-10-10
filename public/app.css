@@ -898,3 +898,13 @@ mark{background:#FFD34D;color:#141413;border-radius:3px;padding:0 1px}
 .wall-tile[aria-pressed=true]{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
 .wall-tile.reset{justify-content:center}
 @media (max-width:420px){.wall-grid{grid-template-columns:repeat(3,1fr)}.accent-row{grid-template-columns:repeat(2,1fr)}}
+
+/* ---------- v16: права в группах, ссылки ---------- */
+.role-tag{font-size:12px;font-weight:600;color:var(--accent);background:var(--accent-soft);padding:3px 8px;border-radius:8px;flex:none}
+.role-tag.owner{color:var(--on-accent);background:var(--accent)}
+.invite-list{display:flex;flex-direction:column;gap:8px}
+.invite-row{padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+.invite-row.dead{opacity:.55}
+.invite-link{display:flex;align-items:center;gap:4px}
+.invite-link code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--accent)}
+.pg-actions{flex-wrap:wrap}
