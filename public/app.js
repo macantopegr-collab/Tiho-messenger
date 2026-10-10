@@ -93,7 +93,7 @@
 
   /* ---------- состояние ---------- */
   const S = {
-    me: null, priv: null, pub: null, config: { needCode: false, maxFile: 25 * 1024 * 1024 },
+    me: null, priv: null, pub: null, config: { maxFile: 25 * 1024 * 1024 },
     chats: new Map(), msgs: new Map(), plain: new Map(), userKeys: new Map(),
     active: null, filter: 'all', query: '', people: [], typing: new Map(),
     reply: null, uploads: 0, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
@@ -237,10 +237,8 @@
     const submit = h('button', { class: 'btn block', type: 'submit' }, mode === 'login' ? 'Войти' : 'Создать аккаунт');
     const f = {
       username: h('input', { class: 'input', name: 'username', autocomplete: 'username', autocapitalize: 'none', spellcheck: 'false', required: true, placeholder: 'например, anna_s' }),
-      name: h('input', { class: 'input', name: 'name', autocomplete: 'name', placeholder: 'Как вас увидят другие' }),
       password: h('input', { class: 'input', type: 'password', name: 'password', autocomplete: mode === 'login' ? 'current-password' : 'new-password', required: true, minlength: mode === 'login' ? null : 8 }),
       password2: h('input', { class: 'input', type: 'password', autocomplete: 'new-password', required: true }),
-      code: h('input', { class: 'input', autocomplete: 'off', placeholder: 'Выдаёт владелец сервера' }),
     };
     const form = h('form', {
       onsubmit: async (e) => {
@@ -260,8 +258,8 @@
           if (mode === 'register') {
             const id = await C.createIdentity(kek);
             const r = await api('/api/register', { body: {
-              username, displayName: f.name.value.trim() || username, auth,
-              publicKey: id.publicKey, keyBackup: id.backup, code: f.code.value.trim() } });
+              username, displayName: username, auth,
+              publicKey: id.publicKey, keyBackup: id.backup } });
             await C.saveKey(r.user.id, id.privateKey, id.publicKey);
             Object.assign(S, { me: r.user, priv: id.privateKey, pub: id.publicKey });
           } else {
@@ -279,12 +277,10 @@
       },
     },
     h('label', { class: 'field-label' }, 'Логин', f.username),
-    mode === 'register' && h('label', { class: 'field-label' }, 'Имя', f.name),
     h('label', { class: 'field-label' }, 'Пароль', f.password),
     mode === 'register' && h('label', { class: 'field-label' }, 'Повторите пароль', f.password2),
-    mode === 'register' && S.config.needCode && h('label', { class: 'field-label' }, 'Код приглашения', f.code),
     mode === 'register' && h('div', { class: 'note' }, icon('lock', 18), h('span', null,
-      'Пароль защищает ваши ключи шифрования. Восстановить его нельзя — без пароля старые сообщения не прочитать. Запишите его.')),
+      'Запомните пароль: восстановить его нельзя, без него старые сообщения не прочитать.')),
     err, submit);
 
     root.append(h('div', { class: 'auth' }, h('div', { class: 'auth-card' },

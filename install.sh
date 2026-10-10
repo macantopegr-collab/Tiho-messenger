@@ -72,14 +72,11 @@ chmod 700 "$DATA_DIR"
 
 if [ ! -f "$ENV_FILE" ]; then
   say "Создаю настройки $ENV_FILE"
-  CODE="$(tr -dc 'a-z0-9' </dev/urandom | head -c 8)"
   cat > "$ENV_FILE" <<EOF
 # Настройки «Тихо». После изменения: systemctl restart tiho
 PORT=3000
 HOST=127.0.0.1
 DATA_DIR=$DATA_DIR
-# Код приглашения для регистрации. Оставьте пустым, чтобы регистрироваться мог любой.
-REGISTRATION_CODE=$CODE
 # Максимальный размер файла, МБ
 MAX_FILE_MB=25
 EOF
@@ -137,12 +134,8 @@ ufw --force enable >/dev/null
 sleep 2
 systemctl is-active --quiet tiho || { journalctl -u tiho -n 30 --no-pager; die "мессенджер не запустился (лог выше)"; }
 
-CODE_NOW="$(grep '^REGISTRATION_CODE=' "$ENV_FILE" | cut -d= -f2-)"
 printf '\n\033[1;32m✔ Готово!\033[0m\n\n'
-echo "  Адрес:            https://$DOMAIN"
-if [ -n "$CODE_NOW" ]; then
-  echo "  Код приглашения:  $CODE_NOW   (нужен при регистрации; поменять — в $ENV_FILE)"
-fi
+echo "  Адрес:  https://$DOMAIN"
 echo
 echo "  Первое открытие может занять до минуты, пока выпускается HTTPS-сертификат."
 echo "  Логи:        journalctl -u tiho -f"

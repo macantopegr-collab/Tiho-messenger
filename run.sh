@@ -57,8 +57,7 @@ fi
 # 4. Настройки
 ENV_FILE="$DATA/tiho.env"
 if [ ! -f "$ENV_FILE" ]; then
-  CODE="$(tr -dc 'a-z0-9' </dev/urandom | head -c 8)"
-  printf '# Настройки «Тихо». После изменения: bash run.sh\n# Код приглашения (пусто — регистрация открыта для всех)\nREGISTRATION_CODE=%s\nMAX_FILE_MB=25\n' "$CODE" > "$ENV_FILE"
+  printf '# Настройки «Тихо». После изменения: bash run.sh\nMAX_FILE_MB=25\n' > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
 fi
 set -a; . "$ENV_FILE"; set +a
@@ -100,7 +99,6 @@ echo "$URL" > "$DATA/url.txt"
 
 printf '\n\033[1;32m✔ Мессенджер работает!\033[0m\n\n'
 echo "  Адрес:            $URL"
-[ -n "${REGISTRATION_CODE:-}" ] && echo "  Код приглашения:  $REGISTRATION_CODE"
 echo
 echo "  Адрес меняется при каждом перезапуске — после перезагрузки сервера"
 echo "  снова выполните:  bash $APP/run.sh"

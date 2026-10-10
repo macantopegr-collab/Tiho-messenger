@@ -17,7 +17,6 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const FILES_DIR = path.join(DATA_DIR, 'files');
-const REGISTRATION_CODE = process.env.REGISTRATION_CODE || '';
 const MAX_FILE = Number(process.env.MAX_FILE_MB || 25) * 1024 * 1024;
 const SESSION_DAYS = 60;
 
@@ -216,12 +215,11 @@ const fail = (res, code, error) => res.status(code).json({ error });
 
 const json = express.json({ limit: '256kb' });
 
-app.get('/api/config', (req, res) => res.json({ needCode: !!REGISTRATION_CODE, maxFile: MAX_FILE }));
+app.get('/api/config', (req, res) => res.json({ maxFile: MAX_FILE }));
 
 app.post('/api/register', json, (req, res) => {
   if (rateLimited('reg:' + req.ip, 10)) return fail(res, 429, 'Слишком много попыток, подождите');
-  const { username, displayName, auth: authKey, publicKey, keyBackup, code } = req.body || {};
-  if (REGISTRATION_CODE && code !== REGISTRATION_CODE) return fail(res, 403, 'Неверный код приглашения');
+  const { username, displayName, auth: authKey, publicKey, keyBackup } = req.body || {};
   if (!USERNAME_RE.test(username || '')) return fail(res, 400, 'Логин: 3–32 символа, латиница, цифры и _');
   const name = cleanName(displayName) || username;
   if (!isB64(authKey, 200) || !isB64(publicKey, 400)) return fail(res, 400, 'Некорректные данные ключа');
