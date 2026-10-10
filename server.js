@@ -7,6 +7,9 @@
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
+const net = require('net');
+const dns = require('dns');
 const crypto = require('crypto');
 const express = require('express');
 const { WebSocketServer } = require('ws');
@@ -116,6 +119,12 @@ CREATE TABLE IF NOT EXISTS files (
     file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
     PRIMARY KEY (file_id, chat_id));`);
+  db.exec(`CREATE TABLE IF NOT EXISTS mentions (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (message_id, user_id));
+  CREATE INDEX IF NOT EXISTS idx_mentions_user ON mentions(user_id, chat_id, message_id);`);
   db.exec(`CREATE TABLE IF NOT EXISTS reactions (
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -154,7 +163,9 @@ const q = {
   myChats: db.prepare(`SELECT c.*, m.last_read_id, m.archived,
                          (SELECT MAX(id) FROM messages WHERE chat_id = c.id) AS last_id,
                          (SELECT COUNT(*) FROM messages WHERE chat_id = c.id AND id > m.last_read_id
-                            AND (sender_id IS NULL OR sender_id != m.user_id)) AS unread
+                            AND (sender_id IS NULL OR sender_id != m.user_id)) AS unread,
+                         (SELECT COUNT(*) FROM mentions mn JOIN messages mm ON mm.id = mn.message_id
+                            WHERE mn.chat_id = c.id AND mn.user_id = m.user_id AND mn.message_id > m.last_read_id AND mm.kind = 'msg') AS mentions
                        FROM members m JOIN chats c ON c.id = m.chat_id WHERE m.user_id = ?`),
   messageById: db.prepare('SELECT * FROM messages WHERE id = ?'),
   insertMessage: db.prepare('INSERT INTO messages (chat_id, sender_id, kind, body, created_at) VALUES (?, ?, ?, ?, ?)'),
@@ -301,7 +312,7 @@ function chatView(chat, userId) {
     members, lastMessage: last ? messageView(last) : null,
     pinned: chat.pinned_id ? (() => { const pm = q.messageById.get(chat.pinned_id); return pm && pm.kind !== 'deleted' ? messageView(pm) : null; })() : null,
     archived: !!chat.archived,
-    unread: chat.unread ?? 0, lastReadId: chat.last_read_id ?? members.find((m) => m.id === userId)?.lastReadId ?? 0,
+    unread: chat.unread ?? 0, mentions: chat.mentions ?? 0, lastReadId: chat.last_read_id ?? members.find((m) => m.id === userId)?.lastReadId ?? 0,
   };
 }
 function fullChat(chatId, userId) {
@@ -401,6 +412,122 @@ app.get('/api/gif/file', auth, async (req, res) => {
     res.setHeader('Cache-Control', 'private, max-age=86400');
     res.end(buf);
   } catch { fail(res, 502, 'GIPHY не отвечает'); }
+});
+
+/* ---------- Предпросмотр ссылок ----------
+ * Карточку собирает отправитель: его браузер просит сервер прочитать страницу,
+ * потом кладёт заголовок и уменьшенную картинку внутрь зашифрованного сообщения.
+ * Получатели ничего не скачивают. Запросы во внутреннюю сеть запрещены. */
+const LINK_PRIVATE_OK = process.env.LINK_PREVIEW_PRIVATE === '1';
+function privateIp(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b < 128) || (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)) || a >= 224;
+  }
+  const x = ip.toLowerCase();
+  if (x.startsWith('::ffff:')) return privateIp(x.slice(7));
+  return x === '::' || x === '::1' || x.startsWith('fc') || x.startsWith('fd') || x.startsWith('fe8') || x.startsWith('fe9') || x.startsWith('fea') || x.startsWith('feb') || x.startsWith('ff');
+}
+function safeLookup(host, opts, cb) {
+  dns.lookup(host, { all: true }, (err, list) => {
+    if (err) return cb(err);
+    const ok = list.filter((a) => LINK_PRIVATE_OK || !privateIp(a.address));
+    if (!ok.length) return cb(new Error('blocked address'));
+    if (opts && opts.all) return cb(null, ok);
+    cb(null, ok[0].address, ok[0].family);
+  });
+}
+function fetchLimited(url, { maxBytes, accept, redirects = 4 }) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(url); } catch { return reject(new Error('bad url')); }
+    if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) return reject(new Error('bad url'));
+    if (u.port && !['80', '443', '8080', '8443'].includes(u.port) && !LINK_PRIVATE_OK) return reject(new Error('bad port'));
+    const literal = u.hostname.replace(/^\[|\]$/g, '');
+    if (net.isIP(literal) && privateIp(literal) && !LINK_PRIVATE_OK) return reject(new Error('blocked address')); // для IP lookup не вызывается
+    const mod = u.protocol === 'https:' ? https : http;
+    const req = mod.get(u, { lookup: safeLookup, timeout: 6000, headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; TihoLinkPreview/1.0)', Accept: accept, 'Accept-Language': 'ru,en;q=0.8' } }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        if (redirects <= 0) return reject(new Error('too many redirects'));
+        return resolve(fetchLimited(new URL(res.headers.location, u).href, { maxBytes, accept, redirects: redirects - 1 }));
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('status ' + res.statusCode)); }
+      const chunks = []; let size = 0;
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > maxBytes) { chunks.push(c.subarray(0, c.length - (size - maxBytes))); res.destroy(); }
+        else chunks.push(c);
+      });
+      const done = () => resolve({ url: u.href, type: String(res.headers['content-type'] || ''), body: Buffer.concat(chunks), cut: size > maxBytes });
+      res.on('end', done); res.on('close', done); res.on('error', reject);
+    });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+  });
+}
+const htmlDecode = (s) => String(s || '').replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp|laquo|raquo|mdash|ndash|hellip);/gi, (m, e) => {
+  const k = e.toLowerCase();
+  if (k[0] === '#') { const n = k[1] === 'x' ? parseInt(k.slice(2), 16) : parseInt(k.slice(1), 10); try { return String.fromCodePoint(n); } catch { return ''; } }
+  return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', laquo: '«', raquo: '»', mdash: '—', ndash: '–', hellip: '…' }[k];
+}).replace(/\s+/g, ' ').trim();
+function parsePreview(html, base) {
+  const head = html.slice(0, 300000);
+  const meta = {};
+  for (const tag of head.match(/<meta\b[^>]*>/gi) || []) {
+    const attr = (n) => (new RegExp(`\\b${n}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i').exec(tag) || [])
+      .slice(2).find((x) => x !== undefined);
+    const key = (attr('property') || attr('name') || '').toLowerCase();
+    const val = attr('content');
+    if (key && val !== undefined && !(key in meta)) meta[key] = htmlDecode(val);
+  }
+  const title = meta['og:title'] || meta['twitter:title'] || htmlDecode((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(head) || [])[1]);
+  const desc = meta['og:description'] || meta['twitter:description'] || meta.description || '';
+  let image = meta['og:image'] || meta['og:image:url'] || meta['twitter:image'] || meta['twitter:image:src'] || '';
+  try { image = image ? new URL(image, base).href : ''; } catch { image = ''; }
+  if (image && !/^https?:/.test(image)) image = '';
+  const site = meta['og:site_name'] || new URL(base).hostname.replace(/^www\./, '');
+  return { title: title.slice(0, 200), description: desc.slice(0, 300), site: site.slice(0, 80), image };
+}
+const previewCache = new Map();
+app.get('/api/link-preview', auth, async (req, res) => {
+  const url = String(req.query.url || '').slice(0, 2000);
+  if (!/^https?:\/\//i.test(url)) return fail(res, 400, 'Нужна ссылка http(s)');
+  if (rateLimited('lp:' + req.user.id, 60, 60000)) return fail(res, 429, 'Слишком часто');
+  const hit = previewCache.get(url);
+  if (hit && hit.exp > now()) return res.json(hit.data);
+  try {
+    const r = await fetchLimited(url, { maxBytes: 600 * 1024, accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.5' });
+    let data;
+    if (/^image\/(jpeg|png|gif|webp)/.test(r.type)) data = { url, title: '', description: '', site: new URL(r.url).hostname, image: r.url };
+    else if (/html/.test(r.type) || !r.type) {
+      const cs = (/charset=([\w-]+)/i.exec(r.type) || /<meta[^>]+charset=["']?([\w-]+)/i.exec(r.body.subarray(0, 4096).toString('latin1')) || [])[1] || 'utf-8';
+      let html;
+      try { html = new TextDecoder(cs.toLowerCase()).decode(r.body); } catch { html = r.body.toString('utf8'); }
+      data = { url, ...parsePreview(html, r.url) };
+    } else return fail(res, 404, 'Нет предпросмотра');
+    if (!data.title && !data.description && !data.image) return fail(res, 404, 'Нет предпросмотра');
+    if (data.image) data.image = '/api/link-preview/image?u=' + encodeURIComponent(data.image);
+    if (previewCache.size > 500) previewCache.delete(previewCache.keys().next().value);
+    previewCache.set(url, { data, exp: now() + 3600000 });
+    res.json(data);
+  } catch { fail(res, 404, 'Нет предпросмотра'); }
+});
+app.get('/api/link-preview/image', auth, async (req, res) => {
+  const u = String(req.query.u || '').slice(0, 2000);
+  if (rateLimited('lpi:' + req.user.id, 60, 60000)) return fail(res, 429, 'Слишком часто');
+  try {
+    const r = await fetchLimited(u, { maxBytes: 4 * 1024 * 1024, accept: 'image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8' });
+    const b = r.body;
+    const type = b[0] === 0xff && b[1] === 0xd8 ? 'image/jpeg' : b[0] === 0x89 && b[1] === 0x50 ? 'image/png'
+      : b.subarray(0, 3).toString() === 'GIF' ? 'image/gif' : b.subarray(8, 12).toString() === 'WEBP' ? 'image/webp' : null;
+    if (!type || r.cut) return fail(res, 404, 'Нет картинки');
+    res.setHeader('Content-Type', type);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.end(b);
+  } catch { fail(res, 404, 'Нет картинки'); }
 });
 
 /* ---------- Вход через Google (проверка ID-токена Google Identity Services) ---------- */
@@ -723,7 +850,7 @@ app.get('/api/chats/:id/messages', auth, (req, res) => {
 });
 
 function validEnvelope(e) {
-  if (!e || e.v !== 1 || !isB64(e.iv, 64) || typeof e.ct !== 'string' || e.ct.length > 120000 || !isB64(e.epk, 400)) return false;
+  if (!e || e.v !== 1 || !isB64(e.iv, 64) || typeof e.ct !== 'string' || e.ct.length > 200000 || !isB64(e.epk, 400)) return false;
   if (!e.keys || typeof e.keys !== 'object') return false;
   return Object.values(e.keys).every((k) => k && isB64(k.iv, 64) && isB64(k.wk, 200));
 }
@@ -734,9 +861,17 @@ app.post('/api/chats/:id/messages', auth, json, (req, res) => {
   if (!validEnvelope(env)) return fail(res, 400, 'Некорректное зашифрованное сообщение');
   const info = q.insertMessage.run(chat.id, req.user.id, 'msg', JSON.stringify(env), now());
   q.setRead.run(info.lastInsertRowid, chat.id, req.user.id);
+  /* Упоминания: текст зашифрован, поэтому клиент сам сообщает, кого отметил (только участников чата) */
+  const mentioned = new Set();
+  if (Array.isArray(req.body.mentions)) {
+    for (const id of req.body.mentions.slice(0, 50).map(Number)) {
+      if (Number.isInteger(id) && id !== req.user.id && q.isMember.get(chat.id, id)) mentioned.add(id);
+    }
+    for (const id of mentioned) db.prepare('INSERT OR IGNORE INTO mentions (message_id, chat_id, user_id) VALUES (?, ?, ?)').run(info.lastInsertRowid, chat.id, id);
+  }
   const msg = messageView(q.messageById.get(info.lastInsertRowid));
-  for (const { user_id } of q.memberIds.all(chat.id)) sendTo(user_id, { type: 'message', message: msg, clientId: req.body.clientId });
-  pushMessage(chat.id, req.user.id, 'Новое сообщение');
+  for (const { user_id } of q.memberIds.all(chat.id)) sendTo(user_id, { type: 'message', message: msg, clientId: req.body.clientId, mentioned: mentioned.has(user_id) || undefined });
+  pushMessage(chat.id, req.user.id, 'Новое сообщение', mentioned);
   res.json({ message: msg });
 });
 
@@ -912,15 +1047,16 @@ function pushTo(userId, payload, force = false) {
       .catch((e) => { if (e.statusCode === 404 || e.statusCode === 410) db.prepare('DELETE FROM push_subs WHERE endpoint = ?').run(s.endpoint); });
   }
 }
-function pushMessage(chatId, senderId, kindText) {
+function pushMessage(chatId, senderId, kindText, mentioned) {
   const chat = q.chatById.get(chatId);
   const sender = senderId ? q.userById.get(senderId) : null;
   if (!chat || !sender) return;
   for (const { user_id } of q.memberIds.all(chatId)) {
     if (user_id === senderId) continue;
+    const text = mentioned?.has(user_id) ? 'Упомянул(а) вас' : kindText;
     pushTo(user_id, {
       title: chat.type === 'group' ? chat.title : sender.display_name,
-      body: chat.type === 'group' ? `${sender.display_name}: ${kindText}` : kindText,
+      body: chat.type === 'group' ? `${sender.display_name}: ${text}` : text,
       tag: 'chat-' + chatId, url: '/', chatId,
     });
   }
