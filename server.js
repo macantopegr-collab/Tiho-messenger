@@ -1187,6 +1187,135 @@ app.get('/api/admin/banned', auth, adminOnly, (req, res) => {
 });
 app.post('/api/admin/unban', auth, adminOnly, json, (req, res) => { banUser(Number(req.body?.userId), false); res.json({ ok: true }); });
 
+/* ---------- Истории: видны контактам 24 часа, зашифрованы для каждого зрителя ---------- */
+const STORY_DIR = path.join(DATA_DIR, 'story-files');
+fs.mkdirSync(STORY_DIR, { recursive: true });
+const STORY_TTL = 24 * 3600000;
+db.exec(`CREATE TABLE IF NOT EXISTS stories (
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL, body TEXT NOT NULL, file_id TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_stories_user ON stories(user_id, expires_at);
+CREATE TABLE IF NOT EXISTS story_audience (
+  story_id INTEGER NOT NULL REFERENCES stories(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY (story_id, user_id));
+CREATE INDEX IF NOT EXISTS idx_story_aud_user ON story_audience(user_id);
+CREATE TABLE IF NOT EXISTS story_views (
+  story_id INTEGER NOT NULL REFERENCES stories(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  viewed_at INTEGER NOT NULL, reaction TEXT, PRIMARY KEY (story_id, user_id));
+CREATE TABLE IF NOT EXISTS story_files (
+  id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, size INTEGER NOT NULL, created_at INTEGER NOT NULL);`);
+function purgeStories() {
+  const old = db.prepare('SELECT id, file_id FROM stories WHERE expires_at <= ?').all(now());
+  for (const st of old) if (st.file_id) { try { fs.unlinkSync(path.join(STORY_DIR, st.file_id)); } catch { /* нет */ } }
+  db.prepare('DELETE FROM stories WHERE expires_at <= ?').run(now());
+  // файлы, загруженные, но не опубликованные
+  for (const f of db.prepare('SELECT id FROM story_files WHERE created_at < ? AND id NOT IN (SELECT file_id FROM stories WHERE file_id IS NOT NULL)').all(now() - 3600000)) {
+    try { fs.unlinkSync(path.join(STORY_DIR, f.id)); } catch { /* нет */ }
+    db.prepare('DELETE FROM story_files WHERE id = ?').run(f.id);
+  }
+}
+setInterval(purgeStories, 10 * 60000).unref();
+const storyContacts = (userId) => q.contactIds.all(userId, userId).map((r) => r.id).filter((id) => !blockState(userId, id));
+function storyView(st, viewerId) {
+  const mine = st.user_id === viewerId;
+  const v = db.prepare('SELECT viewed_at, reaction FROM story_views WHERE story_id = ? AND user_id = ?').get(st.id, viewerId);
+  return { id: st.id, userId: st.user_id, kind: st.kind, envelope: JSON.parse(st.body), fileId: st.file_id, createdAt: st.created_at, expiresAt: st.expires_at,
+    seen: mine || !!v, reaction: v?.reaction || null,
+    views: mine ? db.prepare('SELECT COUNT(*) AS n FROM story_views WHERE story_id = ?').get(st.id).n : undefined };
+}
+app.get('/api/stories', auth, (req, res) => {
+  const t = now();
+  const rows = db.prepare(`SELECT s.* FROM stories s WHERE s.expires_at > ? AND (s.user_id = ? OR EXISTS
+    (SELECT 1 FROM story_audience a WHERE a.story_id = s.id AND a.user_id = ?)) ORDER BY s.id`).all(t, req.user.id, req.user.id);
+  const by = new Map();
+  for (const r of rows) {
+    if (r.user_id !== req.user.id && blockState(req.user.id, r.user_id)) continue;
+    if (!by.has(r.user_id)) by.set(r.user_id, []);
+    by.get(r.user_id).push(storyView(r, req.user.id));
+  }
+  const feed = [...by].map(([uid, stories]) => {
+    const u = q.userById.get(uid);
+    return { user: { ...publicUser(u), publicKey: u.public_key }, stories, unseen: stories.some((x) => !x.seen), last: stories[stories.length - 1].createdAt };
+  });
+  res.json({ feed, audience: storyContacts(req.user.id).map((id) => { const u = q.userById.get(id); return { id: u.id, publicKey: u.public_key }; }) });
+});
+app.post('/api/stories/files', auth, express.raw({ type: 'application/octet-stream', limit: MAX_FILE + 1024 }), (req, res) => {
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return fail(res, 400, 'Пустой файл');
+  if (rateLimited('story-file:' + req.user.id, 60, 3600000)) return fail(res, 429, 'Слишком много историй, подождите');
+  const id = crypto.randomBytes(16).toString('hex');
+  fs.writeFileSync(path.join(STORY_DIR, id), req.body);
+  db.prepare('INSERT INTO story_files (id, user_id, size, created_at) VALUES (?, ?, ?, ?)').run(id, req.user.id, req.body.length, now());
+  res.json({ id });
+});
+app.get('/api/stories/files/:id', auth, (req, res) => {
+  const id = String(req.params.id);
+  if (!/^[a-f0-9]{32}$/.test(id)) return fail(res, 404, 'Файл не найден');
+  const ok = db.prepare(`SELECT 1 FROM stories s WHERE s.file_id = ? AND s.expires_at > ? AND (s.user_id = ? OR EXISTS
+    (SELECT 1 FROM story_audience a WHERE a.story_id = s.id AND a.user_id = ?))`).get(id, now(), req.user.id, req.user.id)
+    || db.prepare('SELECT 1 FROM story_files WHERE id = ? AND user_id = ?').get(id, req.user.id);
+  if (!ok || !fs.existsSync(path.join(STORY_DIR, id))) return fail(res, 404, 'Файл не найден');
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  fs.createReadStream(path.join(STORY_DIR, id)).pipe(res);
+});
+app.post('/api/stories', auth, json, (req, res) => {
+  if (rateLimited('story:' + req.user.id, 30, 3600000)) return fail(res, 429, 'Слишком много историй, подождите');
+  const env = req.body?.envelope;
+  const kind = ['photo', 'video', 'text'].includes(req.body?.kind) ? req.body.kind : null;
+  if (!kind || !validEnvelope(env)) return fail(res, 400, 'Некорректная история');
+  const fileId = req.body.fileId ? String(req.body.fileId) : null;
+  if (kind !== 'text' && !(fileId && db.prepare('SELECT 1 FROM story_files WHERE id = ? AND user_id = ?').get(fileId, req.user.id))) return fail(res, 400, 'Файл не найден');
+  const allowed = new Set(storyContacts(req.user.id));
+  const audience = Object.keys(env.keys).map(Number).filter((id) => allowed.has(id));
+  const id = db.transaction(() => {
+    const sid = db.prepare('INSERT INTO stories (user_id, kind, body, file_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(req.user.id, kind, JSON.stringify(env), kind === 'text' ? null : fileId, now(), now() + STORY_TTL).lastInsertRowid;
+    for (const uid of audience) db.prepare('INSERT OR IGNORE INTO story_audience (story_id, user_id) VALUES (?, ?)').run(sid, uid);
+    return sid;
+  })();
+  for (const uid of [req.user.id, ...audience]) sendTo(uid, { type: 'stories' });
+  res.json({ story: storyView(db.prepare('SELECT * FROM stories WHERE id = ?').get(id), req.user.id), audience: audience.length });
+});
+function storyFor(req, res) {
+  const st = db.prepare('SELECT * FROM stories WHERE id = ? AND expires_at > ?').get(Number(req.params.id), now());
+  const ok = st && (st.user_id === req.user.id || db.prepare('SELECT 1 FROM story_audience WHERE story_id = ? AND user_id = ?').get(st.id, req.user.id));
+  if (!ok) { fail(res, 404, 'История не найдена или исчезла'); return null; }
+  return st;
+}
+app.post('/api/stories/:id/view', auth, (req, res) => {
+  const st = storyFor(req, res); if (!st) return;
+  if (st.user_id !== req.user.id) {
+    const r = db.prepare('INSERT OR IGNORE INTO story_views (story_id, user_id, viewed_at) VALUES (?, ?, ?)').run(st.id, req.user.id, now());
+    if (r.changes) sendTo(st.user_id, { type: 'storyViews', storyId: st.id });
+  }
+  res.json({ ok: true });
+});
+app.post('/api/stories/:id/react', auth, json, (req, res) => {
+  const st = storyFor(req, res); if (!st) return;
+  if (st.user_id === req.user.id) return fail(res, 400, 'Нельзя');
+  const emoji = String(req.body?.emoji || '');
+  if (emoji && !REACTIONS.includes(emoji)) return fail(res, 400, 'Такой реакции нет');
+  db.prepare('INSERT INTO story_views (story_id, user_id, viewed_at, reaction) VALUES (?, ?, ?, ?) ON CONFLICT(story_id, user_id) DO UPDATE SET reaction = excluded.reaction')
+    .run(st.id, req.user.id, now(), emoji || null);
+  sendTo(st.user_id, { type: 'storyViews', storyId: st.id, reaction: emoji || null, from: req.user.display_name });
+  res.json({ ok: true });
+});
+app.get('/api/stories/:id/views', auth, (req, res) => {
+  const st = storyFor(req, res); if (!st) return;
+  if (st.user_id !== req.user.id) return fail(res, 403, 'Только автор видит просмотры');
+  const rows = db.prepare('SELECT v.*, u.* FROM story_views v JOIN users u ON u.id = v.user_id WHERE v.story_id = ? ORDER BY v.viewed_at DESC').all(st.id);
+  res.json({ views: rows.map((r) => ({ user: publicUser(r), viewedAt: r.viewed_at, reaction: r.reaction })) });
+});
+app.delete('/api/stories/:id', auth, (req, res) => {
+  const st = storyFor(req, res); if (!st) return;
+  if (st.user_id !== req.user.id) return fail(res, 403, 'Нельзя');
+  const aud = db.prepare('SELECT user_id FROM story_audience WHERE story_id = ?').all(st.id).map((r) => r.user_id);
+  if (st.file_id) { try { fs.unlinkSync(path.join(STORY_DIR, st.file_id)); } catch { /* нет */ } db.prepare('DELETE FROM story_files WHERE id = ?').run(st.file_id); }
+  db.prepare('DELETE FROM stories WHERE id = ?').run(st.id);
+  for (const uid of [req.user.id, ...aud]) sendTo(uid, { type: 'stories' });
+  res.json({ ok: true });
+});
+
 /* ---------- Push-уведомления (Web Push, VAPID) ---------- */
 const webpush = require('web-push');
 const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');

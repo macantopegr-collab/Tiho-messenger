@@ -641,6 +641,7 @@
     const list = h('ul', { class: 'chat-list', 'aria-label': 'Чаты' });
     const searchInput = h('input', { type: 'search', placeholder: 'Поиск', 'aria-label': 'Поиск по чатам и @юзернейму', oninput: onSearch });
     const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Папки' });
+    const storyStrip = h('div', { class: 'story-strip', role: 'group', 'aria-label': 'Истории' });
     const chatsView = h('div', { class: 'tab-view', 'data-tab': 'chats' },
       h('div', { class: 'side-head' },
         h('div', { class: 'head-row' },
@@ -648,6 +649,7 @@
           h('button', { class: 'icon-btn accent', 'aria-label': 'Новая группа', title: 'Новая группа', onclick: () => openPicker('group') }, icon('group', 22, 1.8))),
         h('label', { class: 'search' }, icon('search', 18), searchInput),
         chips),
+      storyStrip,
       list,
       h('button', { class: 'fab', 'aria-label': 'Создать', title: 'Создать', onclick: (e) => {
         const r = e.currentTarget.getBoundingClientRect();
@@ -665,7 +667,7 @@
     const app = h('div', { class: 'app' }, side, pane);
     root.append(app);
     S.searchOpen = false;
-    S.refs = { app, list, pane, searchInput, side, tabbar, contactsView, callsView, profileView, chips };
+    S.refs = { app, list, pane, searchInput, side, tabbar, contactsView, callsView, profileView, chips, storyStrip };
     renderChips();
     api('/api/me/folders').then((r) => { S.folders = r.folders; renderChips(); renderList(); }).catch(() => {});
     setTab(S.tab || 'chats');
@@ -673,6 +675,7 @@
     renderPane();
     loadChats().then(openFromLink);
     loadBlocked();
+    loadStories();
     api('/api/me').then((r) => { S.admin = !!r.admin; if (S.tab === 'profile') renderProfileTab(); }).catch(() => {});
     loadChannels();
     getCatalog().then(() => { renderList(); if (S.active) renderMessages(); }).catch(() => {});
@@ -817,6 +820,7 @@
   let searchTimer;
   function onSearch(e) {
     S.query = e.target.value.trim();
+    if (S.refs.storyStrip) S.refs.storyStrip.hidden = !!S.query;
     renderList();
     clearTimeout(searchTimer);
     const qv = S.query.replace(/^@/, '');
@@ -1357,7 +1361,7 @@
     }
     if (p.fwd) bubble.append(h('span', { class: 'fwd' }, icon('forward', 13), 'Переслано от ' + p.fwd));
     if (p.reply) {
-      bubble.append(h('button', { class: 'quote', onclick: () => jumpTo(p.reply.id) }, h('b', null, p.reply.name), h('span', null, p.reply.text)));
+      bubble.append(h('button', { class: 'quote', onclick: () => p.reply.id && jumpTo(p.reply.id) }, h('b', null, p.reply.name), h('span', null, p.reply.text)));
     }
     if (p.t === 'text') {
       bubble.append(...richText(p.text, chat));
@@ -2111,7 +2115,7 @@
     S.ws = ws;
     let opened = false;
     ws.onopen = () => {
-      if (S.wsReconnect) { loadChats(); loadChannels(); }
+      if (S.wsReconnect) { loadChats(); loadChannels(); loadStories(); }
       opened = true; S.wsDelay = 1000; S.wsReconnect = true;
     };
     ws.onmessage = (e) => { let d; try { d = JSON.parse(e.data); } catch { return; } onEvent(d); };
@@ -2148,6 +2152,13 @@
     if (d.type === 'loggedOut') { S.ws = null; toast('Сеанс завершён на другом устройстве'); setTimeout(() => location.reload(), 1200); return; }
     if (d.type === 'reports') { if (S.admin) { toast('Новая жалоба'); if (S.tab === 'profile') renderProfileTab(); } return; }
     if (d.type === 'blocks') return;
+    if (d.type === 'stories') return loadStories();
+    if (d.type === 'storyViews') {
+      if (d.reaction) toast(`${d.from} отреагировал(а) ${d.reaction} на вашу историю`);
+      const st = S.stories.feed.find((f) => f.user.id === S.me.id)?.stories.find((x) => x.id === d.storyId);
+      if (st) { st.views = (st.views || 0) + (d.reaction === undefined ? 1 : 0); S.storyViewer?.refresh?.(); }
+      return;
+    }
     if (d.type === 'call') return onCallSignal(d);
     if (d.type === 'callsChanged') { if (S.tab === 'calls') renderCalls(); return; }
     if (d.type === 'channelPost') {
@@ -3690,6 +3701,294 @@
   }
 
   /* ================= ЗАПУСК ================= */
+  /* ================= ИСТОРИИ ================= */
+  S.stories = { feed: [], audience: [] };
+  const STORY_BGS = ['linear-gradient(135deg,#0A7F4F,#2FD98C)', 'linear-gradient(135deg,#2747E0,#8C5BFF)', 'linear-gradient(135deg,#B5452B,#F2A541)',
+    'linear-gradient(135deg,#A3366B,#F06292)', 'linear-gradient(135deg,#1F6F86,#4FD1C5)', 'linear-gradient(135deg,#1B1F24,#4A5568)'];
+  async function loadStories() {
+    try { S.stories = await api('/api/stories'); } catch { return; }
+    renderStories();
+  }
+  function storyOrder() {
+    const others = S.stories.feed.filter((f) => f.user.id !== S.me.id);
+    others.sort((a, b) => (b.unseen - a.unseen) || b.last - a.last);
+    const mine = S.stories.feed.find((f) => f.user.id === S.me.id);
+    return mine ? [mine, ...others] : others;
+  }
+  function renderStories() {
+    const strip = S.refs.storyStrip;
+    if (!strip) return;
+    clear(strip);
+    const mine = S.stories.feed.find((f) => f.user.id === S.me.id);
+    const item = (u, label, ring, onclick, plus) => h('button', { class: 'story-item', onclick, 'aria-label': label },
+      h('span', { class: 'story-ring ' + ring }, userAvatar(u, 56), plus ? h('span', { class: 'story-plus', 'aria-hidden': 'true' }, icon('plus', 14, 3)) : null),
+      h('span', { class: 'story-name' }, label));
+    strip.append(item(S.me, 'Моя история', mine ? 'seen mine' : 'none', () => (mine ? openStoryViewer(S.me.id) : openStoryCreate()), true));
+    for (const f of storyOrder()) {
+      if (f.user.id === S.me.id) continue;
+      strip.append(item(f.user, f.user.displayName.split(' ')[0], f.unseen ? 'unseen' : 'seen', () => openStoryViewer(f.user.id)));
+    }
+    strip.hidden = !!S.query;
+  }
+  function cleanStory(p) {
+    if (!p || p.t !== 'story') throw new Error('bad');
+    const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+    return { t: 'story', kind: ['photo', 'video', 'text'].includes(p.kind) ? p.kind : 'text', text: str(p.text, 700), caption: str(p.caption, 300),
+      bg: Math.max(0, Math.min(STORY_BGS.length - 1, Number(p.bg) || 0)), key: str(p.key, 64), iv: str(p.iv, 32), mime: str(p.mime, 60),
+      w: Number(p.w) || 0, h: Number(p.h) || 0, dur: Math.max(0, Math.min(60, Number(p.dur) || 0)) };
+  }
+  const storyPlain = new Map();
+  async function storyPayload(st, feed) {
+    if (storyPlain.has(st.id)) return storyPlain.get(st.id);
+    const pr = (async () => cleanStory(await C.decryptMessage(st.envelope, { chatId: 'story', senderId: st.userId,
+      senderPublicKey: st.userId === S.me.id ? S.pub : feed.user.publicKey, myId: S.me.id, myPriv: S.priv })))();
+    storyPlain.set(st.id, pr);
+    pr.catch(() => storyPlain.delete(st.id));
+    return pr;
+  }
+  const storyUrls = new Map();
+  function storyFileUrl(st, p) {
+    if (!storyUrls.has(st.fileId)) {
+      storyUrls.set(st.fileId, (async () => {
+        const res = await fetch('/api/stories/files/' + st.fileId, { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('История недоступна');
+        const plain = await C.decryptFile(await res.arrayBuffer(), p.key, p.iv);
+        const mime = /^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime))$/.test(p.mime) ? p.mime : 'application/octet-stream';
+        return URL.createObjectURL(new Blob([plain], { type: mime }));
+      })().catch((e) => { storyUrls.delete(st.fileId); throw e; }));
+    }
+    return storyUrls.get(st.fileId);
+  }
+
+  /* Создание истории */
+  function openStoryCreate() {
+    const fileIn = h('input', { type: 'file', accept: 'image/*,video/*', class: 'sr', tabindex: '-1', 'aria-hidden': 'true' });
+    fileIn.addEventListener('change', () => { const f = fileIn.files[0]; fileIn.value = ''; if (f) { close(); storyEditor({ file: f }); } });
+    const n = S.stories.audience.length;
+    const close = modal('Новая история', [
+      h('div', { class: 'card' },
+        h('button', { class: 'card-row', onclick: () => fileIn.click() }, h('span', { class: 'ic' }, icon('image', 19, 1.9)),
+          h('span', { class: 'grow' }, h('b', null, 'Фото или видео'), h('small', null, 'Видео — до 60 секунд'))),
+        h('button', { class: 'card-row', onclick: () => { close(); storyEditor({ text: true }); } }, h('span', { class: 'ic' }, icon('edit', 19, 1.9)),
+          h('span', { class: 'grow' }, h('b', null, 'Текст'), h('small', null, 'Надпись на цветном фоне')))),
+      fileIn,
+      h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' },
+        n ? `Историю увидят ваши контакты (${n}) в течение 24 часов. Она зашифрована: сервер не может её посмотреть.` : 'Истории видят ваши контакты — люди, с которыми у вас есть чат. Пока контактов нет.'),
+    ]);
+  }
+  async function storyEditor(src) {
+    let bg = 0, media = null, dur = 0, w = 0, hh = 0;
+    const caption = h('input', { class: 'input', maxlength: 300, placeholder: 'Подпись (необязательно)' });
+    const textIn = h('textarea', { class: 'story-text-in', maxlength: 700, placeholder: 'Напишите что-нибудь', rows: 4 });
+    const stage = h('div', { class: 'story-stage-edit' });
+    const go = h('button', { class: 'btn block big' }, 'Опубликовать');
+    const body = [stage];
+    if (src.file) {
+      const f = src.file;
+      const url = URL.createObjectURL(f);
+      if (f.type.startsWith('video/')) {
+        media = h('video', { src: url, playsinline: true, muted: true, autoplay: true, loop: true });
+        media.muted = true;
+        await new Promise((r) => { media.onloadedmetadata = r; media.onerror = r; setTimeout(r, 4000); });
+        dur = media.duration || 0; w = media.videoWidth; hh = media.videoHeight;
+        if (dur > 60.5) { toast('Видео длиннее 60 секунд — обрежьте его'); URL.revokeObjectURL(url); return; }
+        if (f.size > S.config.maxFile) { toast(`Видео больше ${fileSize(S.config.maxFile)}`); return; }
+      } else if (f.type.startsWith('image/')) media = h('img', { src: url, alt: '' });
+      else { toast('Нужна картинка или видео'); return; }
+      stage.append(media);
+      body.push(caption);
+    } else {
+      stage.classList.add('text');
+      stage.style.background = STORY_BGS[bg];
+      stage.append(textIn);
+      body.push(h('div', { class: 'story-bgs', role: 'group', 'aria-label': 'Фон' }, STORY_BGS.map((g, i) => h('button', { class: 'story-bg', style: 'background:' + g,
+        'aria-label': 'Фон ' + (i + 1), 'aria-pressed': String(i === 0), onclick: (e) => {
+          bg = i; stage.style.background = g; e.currentTarget.parentNode.querySelectorAll('button').forEach((b, j) => b.setAttribute('aria-pressed', String(j === i)));
+        } }))));
+    }
+    body.push(go);
+    go.addEventListener('click', async () => {
+      if (!src.file && !textIn.value.trim()) { toast('Напишите текст'); return; }
+      go.disabled = true; go.textContent = 'Шифрую и публикую…';
+      try {
+        let payload, kind, fileId = null;
+        if (src.file) {
+          let blob = src.file, mime = src.file.type;
+          if (mime.startsWith('image/') && mime !== 'image/gif') {
+            const bmp = await createImageBitmap(src.file);
+            const k = Math.min(1, 1440 / Math.max(bmp.width, bmp.height));
+            const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+            c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); w = c.width; hh = c.height; bmp.close?.();
+            blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.86)); mime = 'image/jpeg';
+          }
+          const encd = await C.encryptFile(await blob.arrayBuffer());
+          fileId = (await api('/api/stories/files', { raw: encd.data })).id;
+          kind = mime.startsWith('video/') ? 'video' : 'photo';
+          payload = { t: 'story', kind, caption: caption.value.trim(), key: encd.key, iv: encd.iv, mime, w, h: hh, dur: Math.round(dur * 10) / 10 };
+        } else {
+          kind = 'text';
+          payload = { t: 'story', kind, text: textIn.value.trim(), bg };
+        }
+        const recipients = [{ id: S.me.id, publicKey: S.pub }, ...S.stories.audience];
+        const envelope = await C.encryptMessage(payload, { chatId: 'story', senderId: S.me.id, senderPriv: S.priv, recipients });
+        const r = await api('/api/stories', { body: { envelope, kind, fileId } });
+        close();
+        toast(r.audience ? `История опубликована · увидят ${r.audience} ${plural(r.audience, 'контакт', 'контакта', 'контактов')}` : 'История опубликована');
+        loadStories();
+      } catch (e) { toast('Не опубликовано: ' + e.message); go.disabled = false; go.textContent = 'Опубликовать'; }
+    });
+    const close = modal(src.file ? 'Новая история' : 'Текстовая история', body, { onClose: () => media?.pause?.() });
+    if (!src.file) setTimeout(() => textIn.focus(), 50);
+  }
+
+  /* Просмотр историй */
+  function openStoryViewer(userId) {
+    const order = storyOrder();
+    let ui = order.findIndex((f) => f.user.id === userId);
+    if (ui < 0) return;
+    let held = false, si = 0, timer = 0, started = 0, elapsed = 0, length = 6000, paused = false, raf = 0, token = 0, mediaEl = null;
+    const bars = h('div', { class: 'sv-bars' });
+    const who = h('div', { class: 'sv-who' });
+    const stage = h('div', { class: 'sv-stage' });
+    const foot = h('div', { class: 'sv-foot' });
+    const closeBtn = h('button', { class: 'icon-btn', 'aria-label': 'Закрыть истории', onclick: () => close() }, icon('close', 26));
+    const overlay = h('div', { class: 'story-viewer', role: 'dialog', 'aria-label': 'Истории' },
+      h('div', { class: 'sv-frame' }, h('div', { class: 'sv-top' }, bars, h('div', { class: 'sv-head' }, who, closeBtn)), stage,
+        h('button', { class: 'sv-nav prev', 'aria-label': 'Предыдущая история', onclick: () => { if (held) { held = false; return; } prev(); } }),
+        h('button', { class: 'sv-nav next', 'aria-label': 'Следующая история', onclick: () => { if (held) { held = false; return; } next(); } }), foot));
+    const feed = () => order[ui];
+    const story = () => feed().stories[si];
+    const setPaused = (v) => {
+      if (v === paused) return;
+      paused = v;
+      if (v) { elapsed += Date.now() - started; mediaEl?.pause?.(); }
+      else { started = Date.now(); mediaEl?.play?.().catch(() => {}); }
+    };
+    const frame = () => {
+      if (!(mediaEl instanceof HTMLVideoElement)) {
+        const fr = Math.min(1, (elapsed + (paused ? 0 : Date.now() - started)) / length);
+        const bar = bars.children[si]?.firstChild;
+        if (bar) bar.style.width = (fr * 100) + '%';
+        if (fr >= 1) return next();
+      }
+      raf = requestAnimationFrame(frame);
+    };
+    const drawFoot = () => {
+      clear(foot);
+      const st = story(), f = feed();
+      if (f.user.id === S.me.id) {
+        foot.append(h('button', { class: 'sv-views', onclick: openViews }, icon('eye', 18), `${st.views || 0} ${plural(st.views || 0, 'просмотр', 'просмотра', 'просмотров')}`),
+          h('button', { class: 'icon-btn', 'aria-label': 'Удалить историю', onclick: async () => {
+            setPaused(true);
+            if (!confirm('Удалить эту историю?')) { setPaused(false); return; }
+            try { await api('/api/stories/' + st.id, { method: 'DELETE' }); f.stories.splice(si, 1); toast('История удалена'); if (!f.stories.length) { close(); return; } si = Math.min(si, f.stories.length - 1); show(); } catch (e) { toast(e.message); setPaused(false); }
+          } }, icon('trash', 22, 1.8)),
+          h('button', { class: 'icon-btn', 'aria-label': 'Добавить историю', onclick: () => { close(); openStoryCreate(); } }, icon('plus', 24, 2)));
+      } else {
+        const reply = h('input', { class: 'sv-reply', placeholder: 'Ответить…', 'aria-label': 'Ответить на историю', maxlength: 2000,
+          onfocus: () => setPaused(true), onblur: () => setTimeout(() => { if (document.activeElement !== reply) setPaused(false); }, 100),
+          onkeydown: (e) => { if (e.key === 'Enter' && reply.value.trim()) { e.preventDefault(); sendReply(reply.value.trim()); reply.value = ''; reply.blur(); } } });
+        const heart = h('button', { class: 'sv-heart' + (st.reaction ? ' on' : ''), 'aria-label': 'Нравится', 'aria-pressed': String(!!st.reaction), onclick: async () => {
+          const em = st.reaction ? '' : '❤️';
+          try { await api(`/api/stories/${st.id}/react`, { body: { emoji: em } }); st.reaction = em || null; drawFoot(); } catch (e) { toast(e.message); }
+        } }, st.reaction ? '❤️' : '🤍');
+        foot.append(reply, heart);
+      }
+    };
+    const sendReply = async (text) => {
+      const f = feed(), st = story();
+      try {
+        const p = storyPlain.has(st.id) ? await storyPlain.get(st.id) : null;
+        const { chat } = await api('/api/chats/direct', { body: { userId: f.user.id } });
+        S.chats.set(chat.id, { ...(S.chats.get(chat.id) || {}), ...chat });
+        await sendPayload({ t: 'text', text, reply: { id: 0, name: 'Ответ на историю', text: p ? (p.kind === 'text' ? p.text : p.caption || (p.kind === 'video' ? 'Видео' : 'Фото')).slice(0, 120) : 'История' } }, chat.id);
+        toast('Ответ отправлен');
+      } catch (e) { toast('Не отправлено: ' + e.message); }
+    };
+    async function openViews() {
+      setPaused(true);
+      try {
+        const { views } = await api(`/api/stories/${story().id}/views`);
+        modal('Просмотры', [views.length ? h('div', { class: 'card' }, views.map((v) => h('div', { class: 'card-row' }, userAvatar(v.user, 40),
+          h('span', { class: 'grow' }, h('b', null, v.user.displayName), h('small', null, agoText(v.viewedAt))), v.reaction ? h('span', { class: 'sv-react' }, v.reaction) : null)))
+          : h('div', { class: 'list-empty' }, 'Пока никто не посмотрел')], { onClose: () => setPaused(false) });
+      } catch (e) { toast(e.message); setPaused(false); }
+    }
+    async function show() {
+      cancelAnimationFrame(raf); clearTimeout(timer);
+      const my = ++token;
+      const f = feed(), st = story();
+      elapsed = 0; started = Date.now(); paused = false; length = 6000;
+      clear(bars).append(...f.stories.map((_, i) => h('span', { class: 'sv-bar' }, h('i', { style: `width:${i < si ? 100 : 0}%` }))));
+      clear(who).append(userAvatar(f.user, 36), h('span', null, h('b', null, f.user.id === S.me.id ? 'Моя история' : f.user.displayName), h('small', null, agoText(st.createdAt))));
+      drawFoot();
+      mediaEl?.pause?.(); mediaEl = null;
+      clear(stage).append(h('div', { class: 'spin' }));
+      let p;
+      try {
+        p = await storyPayload(st, f);
+        if (my !== token) return;
+        if (p.kind === 'text') {
+          clear(stage).append(h('div', { class: 'sv-text', style: 'background:' + STORY_BGS[p.bg] }, h('p', null, p.text)));
+        } else {
+          const url = await storyFileUrl(st, p);
+          if (my !== token) return;
+          if (p.kind === 'video') {
+            mediaEl = h('video', { src: url, playsinline: true, autoplay: true });
+            mediaEl.addEventListener('loadedmetadata', () => { if (isFinite(mediaEl.duration)) length = mediaEl.duration * 1000; });
+            mediaEl.addEventListener('timeupdate', () => { const b = bars.children[si]?.firstChild; const d = isFinite(mediaEl.duration) ? mediaEl.duration : p.dur || 1; if (b) b.style.width = (mediaEl.currentTime / d * 100) + '%'; });
+            mediaEl.addEventListener('ended', () => next());
+            length = (p.dur || 15) * 1000;
+          } else mediaEl = h('img', { src: url, alt: p.caption || 'История' });
+          clear(stage).append(mediaEl, p.caption ? h('div', { class: 'sv-caption' }, p.caption) : null);
+          mediaEl.play?.().catch(() => { mediaEl.muted = true; mediaEl.play().catch(() => {}); });
+        }
+      } catch {
+        if (my !== token) return;
+        clear(stage).append(h('div', { class: 'sv-text' }, h('p', null, 'Не удалось открыть историю')));
+      }
+      if (!st.seen && f.user.id !== S.me.id) {
+        st.seen = true; f.unseen = f.stories.some((x) => !x.seen);
+        api(`/api/stories/${st.id}/view`, { method: 'POST' }).catch(() => {});
+      }
+      started = Date.now();
+      raf = requestAnimationFrame(frame);
+    }
+    function next() {
+      if (si < feed().stories.length - 1) { si++; return show(); }
+      if (ui < order.length - 1) { ui++; si = Math.max(0, feed().stories.findIndex((x) => !x.seen)); return show(); }
+      close();
+    }
+    function prev() {
+      if (si > 0) { si--; return show(); }
+      if (ui > 0) { ui--; si = 0; return show(); }
+      show();
+    }
+    /* Удержание пальца — пауза */
+    let holdT;
+    const area = (e) => e.target === stage || stage.contains(e.target) || e.target.classList?.contains('sv-nav');
+    overlay.addEventListener('pointerdown', (e) => { if (!area(e)) return; held = false; holdT = setTimeout(() => { held = true; setPaused(true); }, 220); });
+    ['pointerup', 'pointercancel'].forEach((ev) => overlay.addEventListener(ev, (e) => {
+      clearTimeout(holdT);
+      if (!area(e) || document.activeElement?.classList.contains('sv-reply') || document.querySelector('.modal-back')) return;
+      setPaused(false);
+    }));
+    const key = (e) => {
+      if (e.target.classList?.contains('sv-reply') || document.querySelector('.modal-back')) return;
+      if (e.key === 'Escape') close(); else if (e.key === 'ArrowRight') next(); else if (e.key === 'ArrowLeft') prev();
+    };
+    const close = () => {
+      token++; cancelAnimationFrame(raf); clearTimeout(timer); mediaEl?.pause?.();
+      overlay.remove(); document.removeEventListener('keydown', key); S.storyViewer = null; renderStories();
+    };
+    document.addEventListener('keydown', key);
+    document.body.append(overlay);
+    S.storyViewer = { refresh: () => { if (feed().user.id === S.me.id) drawFoot(); } };
+    const firstUnseen = feed().stories.findIndex((x) => !x.seen);
+    si = firstUnseen >= 0 ? firstUnseen : 0;
+    show();
+  }
+
   /* ================= СЕАНСЫ, БЛОКИРОВКА, ЖАЛОБЫ ================= */
   const agoText = (ts) => {
     const d = Date.now() - ts;
