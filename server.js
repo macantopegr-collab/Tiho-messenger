@@ -115,6 +115,10 @@ CREATE TABLE IF NOT EXISTS files (
     db.exec("ALTER TABLE members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'");
     db.exec("UPDATE members SET role = 'owner' WHERE EXISTS (SELECT 1 FROM chats c WHERE c.id = members.chat_id AND c.type = 'group' AND c.created_by = members.user_id)");
   }
+  if (!ccols.has('secret')) db.exec('ALTER TABLE chats ADD COLUMN secret INTEGER NOT NULL DEFAULT 0');
+  if (!ccols.has('ttl')) db.exec('ALTER TABLE chats ADD COLUMN ttl INTEGER NOT NULL DEFAULT 0');
+  if (!mcols.has('expires_at')) db.exec('ALTER TABLE messages ADD COLUMN expires_at INTEGER');
+  if (!mcols.has('file_ref')) db.exec('ALTER TABLE messages ADD COLUMN file_ref TEXT');
   if (!ccols.has('perms')) db.exec("ALTER TABLE chats ADD COLUMN perms TEXT NOT NULL DEFAULT '{}'");
   db.exec(`CREATE TABLE IF NOT EXISTS invites (
     code TEXT PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE, created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -343,7 +347,7 @@ function threadInfo(ids) {
   return out;
 }
 const messageView = (m, reactions, thread) => ({
-  threadId: m.thread_id || null, thread: thread || undefined,
+  threadId: m.thread_id || null, thread: thread || undefined, expiresAt: m.expires_at || null,
   id: m.id, chatId: m.chat_id, senderId: m.sender_id, kind: m.kind,
   body: JSON.parse(m.body), createdAt: m.created_at, editedAt: m.edited_at || null,
   reactions: reactionList(reactions), votes: pollVotes(m.id),
@@ -360,6 +364,7 @@ function chatView(chat, userId) {
     mutedUntil: chat.muted_until > now() ? chat.muted_until : 0,
     scheduled: chat.scheduled_count || 0,
     groupCall: chat.type === 'group' ? roomView(rooms.get(chat.id)) : null,
+    secret: !!chat.secret, ttl: chat.ttl || 0,
     perms: chat.type === 'group' ? groupPerms(chat) : null,
     blocked: chat.type === 'direct' ? blockState(userId, members.find((m) => m.id !== userId)?.id) : null,
     unread: chat.unread ?? 0, mentions: chat.mentions ?? 0, lastReadId: chat.last_read_id ?? members.find((m) => m.id === userId)?.lastReadId ?? 0,
@@ -951,7 +956,7 @@ app.post('/api/chats/:id/messages', auth, json, (req, res) => {
     if (chat.type !== 'group' || !root || root.chat_id !== chat.id || root.thread_id || !['msg', 'gift'].includes(root.kind)) return fail(res, 400, 'Ветка не найдена');
     threadId = root.id;
   }
-  const sendAt = threadId ? 0 : Number(req.body.sendAt) || 0;
+  const sendAt = threadId || chat.secret ? 0 : Number(req.body.sendAt) || 0;
   if (sendAt > now() + 5000) {
     if (sendAt > now() + 366 * 86400000) return fail(res, 400, 'Можно запланировать не больше чем на год вперёд');
     if (db.prepare('SELECT COUNT(*) AS n FROM scheduled WHERE sender_id = ?').get(req.user.id).n >= 100) return fail(res, 400, 'Слишком много отложенных сообщений');
@@ -960,11 +965,12 @@ app.post('/api/chats/:id/messages', auth, json, (req, res) => {
     sendTo(req.user.id, { type: 'scheduled', chatId: chat.id });
     return res.json({ scheduled: { id, sendAt } });
   }
-  res.json({ message: deliverMessage(chat.id, req.user.id, env, req.body.mentions, req.body.clientId, threadId) });
+  res.json({ message: deliverMessage(chat.id, req.user.id, env, req.body.mentions, req.body.clientId, threadId, req.body.fileRef ? String(req.body.fileRef) : null) });
 });
 /* Доставка сообщения: сохранить, разослать, отметить упоминания, отправить push */
-function deliverMessage(chatId, senderId, env, mentions, clientId, threadId = null) {
+function deliverMessage(chatId, senderId, env, mentions, clientId, threadId = null, fileRef = null) {
   const info = q.insertMessage.run(chatId, senderId, 'msg', JSON.stringify(env), now());
+  if (fileRef && /^[a-f0-9]{32}$/.test(fileRef)) db.prepare('UPDATE messages SET file_ref = ? WHERE id = ?').run(fileRef, info.lastInsertRowid);
   if (threadId) db.prepare('UPDATE messages SET thread_id = ? WHERE id = ?').run(threadId, info.lastInsertRowid);
   else q.setRead.run(info.lastInsertRowid, chatId, senderId);
   /* Упоминания: текст зашифрован, поэтому клиент сам сообщает, кого отметил (только участников чата) */
@@ -1100,6 +1106,7 @@ app.post('/api/messages/:id/react', auth, json, (req, res) => {
 app.post('/api/files/:id/share', auth, json, (req, res) => {
   const f = q.fileById.get(String(req.params.id));
   const target = Number(req.body?.chatId);
+  if (f && q.chatById.get(f.chat_id)?.secret) return fail(res, 403, 'Из секретного чата пересылать нельзя');
   const canRead = f && (q.isMember.get(f.chat_id, req.user.id) ||
     db.prepare('SELECT 1 FROM file_access fa JOIN members m ON m.chat_id = fa.chat_id WHERE fa.file_id = ? AND m.user_id = ?').get(f.id, req.user.id));
   if (!canRead || !q.isMember.get(target, req.user.id)) return fail(res, 404, 'Файл не найден');
@@ -1118,6 +1125,72 @@ app.post('/api/chats/:id/pin', auth, json, (req, res) => {
   for (const { user_id } of q.memberIds.all(chat.id)) sendTo(user_id, { type: 'message', message: messageView(sys) });
   broadcastChat(chat.id);
   res.json({ chat: fullChat(chat.id, req.user.id) });
+});
+
+/* ---------- Секретные чаты ---------- */
+function removeMessagesHard(chatId, ids) {
+  if (!ids.length) return;
+  for (const id of ids) {
+    const m = q.messageById.get(id);
+    if (m?.file_ref) { try { fs.unlinkSync(path.join(FILES_DIR, m.file_ref)); } catch { /* нет */ } q.deleteFile.run(m.file_ref); }
+    db.prepare('DELETE FROM messages WHERE id = ?').run(id);
+  }
+  for (const { user_id } of q.memberIds.all(chatId)) sendTo(user_id, { type: 'messagesGone', chatId, ids });
+  broadcastChat(chatId);
+}
+setInterval(() => {
+  const rows = db.prepare('SELECT id, chat_id FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ? LIMIT 500').all(now());
+  const by = new Map();
+  for (const r of rows) { if (!by.has(r.chat_id)) by.set(r.chat_id, []); by.get(r.chat_id).push(r.id); }
+  for (const [cid, ids] of by) { try { removeMessagesHard(cid, ids); } catch (e) { console.warn('expire failed', e.message); } }
+}, 3000).unref();
+app.post('/api/chats/secret', auth, json, (req, res) => {
+  const other = q.userById.get(Number(req.body?.userId));
+  if (!other || other.id === req.user.id) return fail(res, 404, 'Пользователь не найден');
+  if (blockState(req.user.id, other.id)) return fail(res, 403, 'Нельзя: пользователь заблокирован');
+  const key = 's:' + [req.user.id, other.id].sort((a, b) => a - b).join(':');
+  let chat = q.chatByDirectKey.get(key);
+  if (!chat) {
+    db.transaction(() => {
+      const id = q.insertChat.run('direct', null, key, req.user.id, now()).lastInsertRowid;
+      db.prepare('UPDATE chats SET secret = 1, ttl = 0 WHERE id = ?').run(id);
+      q.insertMember.run(id, req.user.id, now()); q.insertMember.run(id, other.id, now());
+      addSystem(id, `${req.user.display_name} создал(а) секретный чат`);
+      chat = q.chatById.get(id);
+    })();
+    broadcastChat(chat.id);
+  }
+  res.json({ chat: fullChat(chat.id, req.user.id) });
+});
+const TTL_NAMES = { 0: 'выключен', 30: '30 секунд', 60: '1 минута', 3600: '1 час', 86400: '1 день', 604800: '1 неделя' };
+app.post('/api/chats/:id/ttl', auth, json, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  if (!chat.secret) return fail(res, 400, 'Таймер есть только в секретных чатах');
+  const ttl = Number(req.body?.ttl) || 0;
+  if (!(ttl in TTL_NAMES)) return fail(res, 400, 'Такого таймера нет');
+  db.prepare('UPDATE chats SET ttl = ? WHERE id = ?').run(ttl, chat.id);
+  const sys = addSystem(chat.id, ttl ? `${req.user.display_name} включил(а) самоуничтожение: ${TTL_NAMES[ttl]}` : `${req.user.display_name} выключил(а) самоуничтожение`);
+  for (const { user_id } of q.memberIds.all(chat.id)) sendTo(user_id, { type: 'message', message: messageView(sys) });
+  broadcastChat(chat.id);
+  res.json({ chat: fullChat(chat.id, req.user.id) });
+});
+/* Фото «на один просмотр»: после просмотра получателем исчезает у обоих */
+app.post('/api/messages/:id/viewed', auth, (req, res) => {
+  const m = q.messageById.get(Number(req.params.id));
+  const chat = m && q.chatById.get(m.chat_id);
+  if (!m || !chat?.secret || !q.isMember.get(chat.id, req.user.id) || m.sender_id === req.user.id) return fail(res, 404, 'Сообщение не найдено');
+  removeMessagesHard(chat.id, [m.id]);
+  res.json({ ok: true });
+});
+app.delete('/api/chats/:id', auth, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  if (!chat.secret) return fail(res, 400, 'Удалить целиком можно только секретный чат');
+  const members = q.memberIds.all(chat.id).map((r) => r.user_id);
+  for (const r of db.prepare('SELECT file_ref FROM messages WHERE chat_id = ? AND file_ref IS NOT NULL').all(chat.id)) { try { fs.unlinkSync(path.join(FILES_DIR, r.file_ref)); } catch { /* нет */ } }
+  for (const f of db.prepare('SELECT id FROM files WHERE chat_id = ?').all(chat.id)) { try { fs.unlinkSync(path.join(FILES_DIR, f.id)); } catch { /* нет */ } }
+  db.prepare('DELETE FROM chats WHERE id = ?').run(chat.id);
+  for (const uid of members) sendTo(uid, { type: 'chatRemoved', chatId: chat.id });
+  res.json({ ok: true });
 });
 
 /* ---------- Права в группах ---------- */
@@ -1283,6 +1356,15 @@ app.post('/api/chats/:id/read', auth, json, (req, res) => {
   const id = Number(req.body?.messageId) || 0;
   q.setRead.run(id, chat.id, req.user.id);
   for (const { user_id } of q.memberIds.all(chat.id)) sendTo(user_id, { type: 'read', chatId: chat.id, userId: req.user.id, messageId: id });
+  if (chat.secret && chat.ttl) {
+    // таймер самоуничтожения запускается, когда собеседник прочитал сообщение
+    const rows = db.prepare("SELECT id FROM messages WHERE chat_id = ? AND id <= ? AND expires_at IS NULL AND kind = 'msg' AND sender_id != ?").all(chat.id, id, req.user.id);
+    if (rows.length) {
+      const at = now() + chat.ttl * 1000;
+      for (const r of rows) db.prepare('UPDATE messages SET expires_at = ? WHERE id = ?').run(at, r.id);
+      for (const { user_id } of q.memberIds.all(chat.id)) sendTo(user_id, { type: 'expiry', chatId: chat.id, ids: rows.map((r) => r.id), expiresAt: at });
+    }
+  }
   res.json({ ok: true });
 });
 

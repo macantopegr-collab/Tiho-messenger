@@ -269,6 +269,7 @@
   const isAdminOf = (chat) => chat?.type === 'group' && ['owner', 'admin'].includes(myRole(chat));
   const allowed = (chat, what) => !chat || chat.type !== 'group' || (chat.perms?.[what] || 'all') !== 'admins' || isAdminOf(chat);
   const ROLE_NAME = { owner: 'владелец', admin: 'админ' };
+  const isSecret = (chat) => !!chat?.secret;
   const isSaved = (chat) => !!chat && chat.type === 'direct' && chat.members.length === 1 && chat.members[0].id === S.me.id;
   const chatTitle = (chat) => chat.type === 'group' ? chat.title : isSaved(chat) ? 'Избранное' : (other(chat)?.displayName || 'Чат');
   function avatar(chat, size = 52) {
@@ -973,6 +974,7 @@
       h('div', { class: 'ci-body' },
         h('div', { class: 'ci-row' },
           c.type === 'group' ? h('span', { class: 'muted', title: 'Группа' }, icon('group', 15)) : null,
+          isSecret(c) ? h('span', { class: 'secret-lock', title: 'Секретный чат', 'aria-label': 'Секретный чат' }, icon('lock', 14, 2.2)) : null,
           h('span', { class: 'ci-name' }, chatTitle(c)),
           isMuted(c) ? h('span', { class: 'muted ci-mute', title: 'Без звука', 'aria-label': 'Без звука' }, icon('bellOff', 14, 2)) : null,
           h('span', { class: 'ci-time' + (c.unread ? ' hot' : '') }, shortTime(lastTs(c)))),
@@ -1206,6 +1208,7 @@
     pane.style.position = 'relative';
     setupDrop(pane);
     applyWallpaper(msgs, chat.id);
+    msgs.classList.toggle('secret-msgs', isSecret(chat));
     renderHead();
     renderPinned();
     renderMessages('bottom');
@@ -1226,7 +1229,7 @@
   /* ---------- Страница контакта / группы ---------- */
   const logoMark = (size = 40) => h('div', { class: 'logo-mark', style: `width:${size}px;height:${size}px;border-radius:${Math.round(size * .3)}px` }, icon('chat', Math.round(size * .56), 2.2));
   const freshUser = (id) => { for (const c of S.chats.values()) { const m = memberOf(c, id); if (m) return m; } return null; };
-  const directWith = (id) => [...S.chats.values()].find((c) => c.type === 'direct' && c.members.some((m) => m.id === id) && (id === S.me.id || c.members.some((m) => m.id !== S.me.id)));
+  const directWith = (id) => [...S.chats.values()].find((c) => c.type === 'direct' && !c.secret && c.members.some((m) => m.id === id) && (id === S.me.id || c.members.some((m) => m.id !== S.me.id)));
   const URL_RE = /\bhttps?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]]/g;
   function chatStuff(chat) {
     const out = { images: [], files: [], links: [] };
@@ -1282,6 +1285,7 @@
         action('phone', 'Звонок', () => startCall(u, 'audio')),
         action('video', 'Видео', () => startCall(u, 'video')),
         action('shield', 'Ключ', async () => { if (chat) openInfo(chat.id); else toast('Сначала напишите собеседнику'); }),
+        action('lock', 'Секретный', () => openSecretChat(u)),
         action('gift', 'Подарить', () => openGiftShop(u)));
     const listCard = h('div', { class: 'card pg-list' });
     const giftsBox = h('div', { class: 'section' });
@@ -1348,9 +1352,12 @@
       h('button', { class: 'icon-btn back', 'aria-label': 'Назад к чатам', onclick: () => (history.state?.chat ? history.back() : closeChat()) }, icon('back', 24)),
       h('button', { class: 'head-av', 'aria-label': 'Профиль', onclick: () => openChatPage(chat) }, avatar(chat, 42)),
       h('button', { class: 'head-title', onclick: () => openChatPage(chat) },
-        h('b', null, chatTitle(chat)), h('small', { class: st.cls }, st.cls === 'typing' ? dots() : null, st.text)),
-      chat.type === 'direct' && !saved && !chat.blocked ? h('button', { class: 'icon-btn', 'aria-label': 'Аудиозвонок', title: 'Аудиозвонок', onclick: () => startCall(other(chat), 'audio') }, icon('phone', 21, 1.8)) : null,
-      chat.type === 'direct' && !saved && !chat.blocked ? h('button', { class: 'icon-btn', 'aria-label': 'Видеозвонок', title: 'Видеозвонок', onclick: () => startCall(other(chat), 'video') }, icon('video', 22, 1.8)) : null,
+        h('b', { class: isSecret(chat) ? 'secret-title' : null }, isSecret(chat) ? icon('lock', 15, 2.4) : null, chatTitle(chat)),
+        h('small', { class: st.cls }, st.cls === 'typing' ? dots() : null, isSecret(chat) && !st.cls ? 'секретный чат · ' : '', st.text)),
+      isSecret(chat) ? h('button', { class: 'icon-btn ttl-btn' + (chat.ttl ? ' on' : ''), 'aria-label': 'Таймер самоуничтожения', title: 'Самоуничтожение', onclick: (e) => ttlMenu(chat, e) },
+        icon('clock', 21, 1.9), chat.ttl ? h('span', { class: 'ttl-badge' }, TTL_SHORT[chat.ttl]) : null) : null,
+      chat.type === 'direct' && !saved && !chat.blocked && !isSecret(chat) ? h('button', { class: 'icon-btn', 'aria-label': 'Аудиозвонок', title: 'Аудиозвонок', onclick: () => startCall(other(chat), 'audio') }, icon('phone', 21, 1.8)) : null,
+      chat.type === 'direct' && !saved && !chat.blocked && !isSecret(chat) ? h('button', { class: 'icon-btn', 'aria-label': 'Видеозвонок', title: 'Видеозвонок', onclick: () => startCall(other(chat), 'video') }, icon('video', 22, 1.8)) : null,
       chat.type === 'group' ? h('button', { class: 'icon-btn', 'aria-label': 'Групповой звонок', title: 'Групповой звонок', onclick: () => joinGroupCall(chat, 'audio') }, icon('phone', 21, 1.8)) : null,
       chat.type === 'group' ? h('button', { class: 'icon-btn hide-sm', 'aria-label': 'Групповой видеозвонок', title: 'Видеозвонок', onclick: () => joinGroupCall(chat, 'video') }, icon('video', 22, 1.8)) : null,
       h('button', { class: 'icon-btn' + (!saved ? ' hide-sm' : ''), 'aria-label': 'Поиск по сообщениям', title: 'Поиск', onclick: openSearch }, icon('search', 22, 1.8)),
@@ -1398,6 +1405,8 @@
     const box = S.msgs.get(chat.id);
     inner.append(isSaved(chat)
       ? h('div', { class: 'e2e' }, icon('bookmark', 16), 'Избранное: сохраняйте сюда сообщения, ссылки и файлы. Видите только вы.')
+      : isSecret(chat) ? h('div', { class: 'e2e secret-e2e' }, icon('lock', 16), h('span', null, h('b', null, 'Секретный чат. '),
+        'Нельзя переслать или скопировать, фото открываются один раз, можно включить самоуничтожение сообщений. Черновики и предпросмотр ссылок не сохраняются.'))
       : h('button', { class: 'e2e', onclick: () => openInfo(chat.id) }, icon('lock', 16),
         'Сообщения защищены сквозным шифрованием. Нажмите, чтобы проверить ключ.'));
     if (!box || (box.loading && !box.list.length)) {
@@ -1456,7 +1465,8 @@
     const senderName = sender?.displayName || 'Бывший участник';
     const showAvatar = chat.type === 'group' && !mine;
 
-    const meta = h('span', { class: 'meta' }, m.editedAt && p.t !== 'deleted' ? h('span', { class: 'edited' }, 'изменено') : null, hm(m.createdAt), mine && p.t !== 'deleted' && !isSaved(chat) ? readStatus(chat, m) : null);
+    const meta = h('span', { class: 'meta' }, m.expiresAt ? h('span', { class: 'ttl-left', 'data-exp': m.expiresAt }, icon('clock', 11, 2.4), ttlLeft(m.expiresAt)) : null,
+      m.editedAt && p.t !== 'deleted' ? h('span', { class: 'edited' }, 'изменено') : null, hm(m.createdAt), mine && p.t !== 'deleted' && !isSaved(chat) ? readStatus(chat, m) : null);
     const bubble = h('div', { class: 'bubble' + (lastOfGroup ? ' tail' : ''), 'data-id': m.id });
     if (showAvatar && firstOfGroup) {
       bubble.append(h('span', { class: 'who', style: `color:${NAME_COLORS[(sender?.color ?? m.senderId) % 8]}` }, senderName));
@@ -1488,7 +1498,7 @@
     } else if (p.t === 'file') {
       bubble.classList.add('media');
       if (p.mime.startsWith('audio/') && p.wave) bubble.classList.add('voice-b');
-      bubble.append(p.mime.startsWith('image/') ? imageEl(p) : p.mime.startsWith('audio/') && p.wave ? voiceEl(p, mine) : fileEl(p));
+      bubble.append(isSecret(chat) && p.mime.startsWith('image/') ? onceEl(m, p, mine) : p.mime.startsWith('image/') ? imageEl(p) : p.mime.startsWith('audio/') && p.wave ? voiceEl(p, mine) : fileEl(p));
       if (p.caption) bubble.append(h('div', { class: 'cap', style: 'white-space:pre-wrap' }, ...richText(p.caption, chat), meta));
       if (p.caption && !mine && mentionsMe(p.caption)) bubble.classList.add('mentioned');
       else bubble.append(h('div', { class: 'cap', style: 'padding-top:0' }, meta));
@@ -1513,7 +1523,7 @@
     const live = !lite && p.t !== 'error' && p.t !== 'deleted' && p.t !== 'gift' && !m.pending;
     const actions = live ? h('div', { class: 'msg-actions' },
       h('button', { 'aria-label': 'Ответить', title: 'Ответить', onclick: () => setReply(m, p, senderName) }, icon('reply', 18)),
-      p.t === 'text' ? h('button', { 'aria-label': 'Копировать', title: 'Копировать', onclick: () => copyText(p.text) }, icon('copy', 17)) : null) : null;
+      p.t === 'text' && !isSecret(chat) ? h('button', { 'aria-label': 'Копировать', title: 'Копировать', onclick: () => copyText(p.text) }, icon('copy', 17)) : null) : null;
     if (live) {
       const items = [
         ['reply', 'Ответить', () => setReply(m, p, senderName)],
@@ -1529,6 +1539,10 @@
         mine && ['trash', 'Удалить у всех', () => deleteMessage(m, p), 'danger'],
         !mine && ['flag', 'Пожаловаться', () => openReport({ kind: 'message', targetId: m.id, user: sender, evidence: reportText(p) }), 'danger'],
       ].filter(Boolean);
+      if (isSecret(chat)) {
+        const banned = new Set(['Переслать', 'В избранное', 'Копировать текст', 'Копировать подпись', 'Скачать файл', 'Сохранить в «Мои GIF»', 'Обсудить в ветке']);
+        for (let i = items.length - 1; i >= 0; i--) if (banned.has(items[i][1])) items.splice(i, 1);
+      }
       items.reactions = { list: S.config.reactions || ['👍', '❤️', '😂', '😮', '😢', '🔥'], pick: (e) => react(m, e),
         mine: m.reactions?.find((r) => r.users.includes(S.me.id))?.emoji };
       bubble.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, items, bubble); });
@@ -1561,7 +1575,7 @@
     const menu = h('div', { class: 'ctx', role: 'menu' },
       rx ? h('div', { class: 'rx-strip' }, rx.list.map((e) => h('button', { class: 'rx' + (rx.mine === e ? ' mine' : ''), 'aria-label': 'Реакция ' + e,
         onclick: () => { close(); rx.pick(e); } }, e))) : null,
-      items.map(([ic, label, fn, cls]) =>
+      items.filter(Boolean).map(([ic, label, fn, cls]) =>
         h('button', { role: 'menuitem', class: cls || null, onclick: () => { close(); fn(); } }, icon(ic, 18), label)));
     document.body.append(menu);
     const r = menu.getBoundingClientRect();
@@ -1593,6 +1607,59 @@
     }
     return S.fileUrls.get(p.fileId);
   }
+  /* ---------- Секретные чаты ---------- */
+  const TTL_SHORT = { 30: '30с', 60: '1м', 3600: '1ч', 86400: '1д', 604800: '1н' };
+  function ttlLeft(at) {
+    const s = Math.max(0, Math.ceil((at - Date.now()) / 1000));
+    if (s < 60) return s + 'с';
+    if (s < 3600) return Math.ceil(s / 60) + 'м';
+    if (s < 86400) return Math.ceil(s / 3600) + 'ч';
+    return Math.ceil(s / 86400) + 'д';
+  }
+  setInterval(() => { document.querySelectorAll('.ttl-left[data-exp]').forEach((el) => { el.lastChild.textContent = ttlLeft(Number(el.dataset.exp)); }); }, 1000);
+  function ttlMenu(chat, e) {
+    const r = e.currentTarget.getBoundingClientRect();
+    const set = (ttl) => async () => { try { const { chat: c } = await api(`/api/chats/${chat.id}/ttl`, { body: { ttl } }); Object.assign(chat, c); renderHead(); } catch (err) { toast(err.message); } };
+    openMenu(r.left - 150, r.bottom + 4, [[0, 'Выключить'], [30, '30 секунд'], [60, '1 минута'], [3600, '1 час'], [86400, '1 день'], [604800, '1 неделя']]
+      .map(([v, l]) => ['clock', (chat.ttl === v ? '✓ ' : '') + l, set(v)]));
+  }
+  async function openSecretChat(u) {
+    try {
+      const { chat } = await api('/api/chats/secret', { body: { userId: u.id } });
+      S.chats.set(chat.id, chat); checkKeys(chat);
+      if (S.page) S.page = null;
+      openChat(chat.id);
+    } catch (e) { toast(e.message); }
+  }
+  /* Фото «на один просмотр» */
+  function onceEl(m, p, mine) {
+    if (mine) {
+      const box = h('div', { class: 'once once-mine' });
+      box.append(imageEl(p), h('span', { class: 'once-note' }, icon('eye', 13), 'исчезнет после просмотра'));
+      return box;
+    }
+    return h('button', { class: 'once', 'aria-label': 'Открыть фото один раз', onclick: async (e) => {
+      const btn = e.currentTarget;
+      clear(btn).append(h('span', { class: 'spin' }));
+      try {
+        const url = await getFileUrl(p);
+        const done = () => { api(`/api/messages/${m.id}/viewed`, { method: 'POST' }).catch(() => {}); URL.revokeObjectURL(url); S.fileUrls.delete(p.fileId); };
+        const close = () => { v.remove(); document.removeEventListener('keydown', esc); done(); };
+        const esc = (ev) => { if (ev.key === 'Escape') close(); };
+        const v = h('div', { class: 'viewer once-viewer', role: 'dialog', 'aria-label': 'Фото на один просмотр', onclick: close, oncontextmenu: (ev) => ev.preventDefault() },
+          h('img', { src: url, alt: '', draggable: 'false' }),
+          h('span', { class: 'once-hint' }, 'Фото исчезнет, когда вы его закроете'),
+          h('button', { class: 'icon-btn', style: 'right:12px', 'aria-label': 'Закрыть', onclick: close }, icon('close', 26)));
+        document.addEventListener('keydown', esc);
+        document.body.append(v);
+      } catch { clear(btn).append(icon('image', 26), 'Не удалось открыть'); }
+    } }, icon('eye', 28, 1.8), h('b', null, 'Фото'), h('small', null, 'Нажмите, чтобы посмотреть · 1 раз'));
+  }
+  /* Пока секретный чат открыт, а окно свёрнуто — размываем переписку */
+  const secretShield = () => document.body.classList.toggle('secret-shield', isSecret(S.chats.get(S.active)) && (document.hidden || !document.hasFocus()));
+  document.addEventListener('visibilitychange', secretShield);
+  window.addEventListener('blur', secretShield); window.addEventListener('focus', secretShield);
+
   function imageEl(p) {
     const w = Math.min(320, p.w || 320);
     const ratio = p.w && p.h ? p.h / p.w : 0.75;
@@ -1829,7 +1896,7 @@
     let heldSend = false;
     const actionBtn = h('button', { class: 'send', onclick: () => { if (heldSend) { heldSend = false; return; } (input.value.trim() || !canVoice ? submit() : startVoice()); } });
     const laterMenu = (x, y) => {
-      if (!input.value.trim() || S.edit) return;
+      if (!input.value.trim() || S.edit || isSecret(chat)) return;
       openMenu(x, y - 60, [['clock', 'Отправить позже', () => scheduleDialog()]]);
     };
     actionBtn.addEventListener('contextmenu', (e) => { e.preventDefault(); laterMenu(e.clientX - 160, e.clientY); });
@@ -1907,7 +1974,7 @@
     };
     const checkLink = () => {
       clearTimeout(lp.timer);
-      const url = store.get('tiho-link-preview', true) ? (input.value.match(URL_RE) || [])[0] || '' : '';
+      const url = store.get('tiho-link-preview', true) && !isSecret(chat) ? (input.value.match(URL_RE) || [])[0] || '' : '';
       if (url === lp.url) return;
       lp.url = url; lp.link = null; drawLink();
       if (!url || lp.off.has(url)) return;
@@ -1928,7 +1995,7 @@
 
     input.addEventListener('input', () => {
       autosize(); syncBtn(); drawMentions(); checkLink();
-      if (!S.edit) setDraft(chat.id, input.value);
+      if (!S.edit && !isSecret(chat)) setDraft(chat.id, input.value);
       if (Date.now() - lastTyping > 2500 && input.value.trim()) {
         lastTyping = Date.now();
         wsSend({ type: 'typing', chatId: chat.id });
@@ -2156,7 +2223,7 @@
         chatId, senderId: S.me.id, senderPriv: S.priv,
         recipients: chat.members.map((m) => ({ id: m.id, publicKey: m.id === S.me.id ? S.pub : m.publicKey })),
       });
-      const { message } = await api(`/api/chats/${chatId}/messages`, { body: { envelope, clientId, mentions: mentionIds(chat, payload) } });
+      const { message } = await api(`/api/chats/${chatId}/messages`, { body: { envelope, clientId, mentions: mentionIds(chat, payload), fileRef: isSecret(chat) && payload.t === 'file' ? payload.fileId : undefined } });
       acceptMessage(message, clientId, payload);
     } catch (e) {
       box.list = box.list.filter((m) => m !== temp);
@@ -2256,7 +2323,7 @@
     const sender = memberOf(chat, msg.senderId)?.displayName || '';
     const title = chat.type === 'group' ? `${chatTitle(chat)}: ${sender}` : sender;
     try {
-      const n = new Notification(title || 'Тихо', { body: showText ? previewOf(plainOf(msg)).slice(0, 140) : 'Новое сообщение', tag: 'chat-' + chat.id, icon: '/icon-192.png' });
+      const n = new Notification(title || 'Тихо', { body: showText && !isSecret(chat) ? previewOf(plainOf(msg)).slice(0, 140) : 'Новое сообщение', tag: 'chat-' + chat.id, icon: '/icon-192.png' });
       n.onclick = () => { window.focus(); openChat(chat.id); n.close(); };
     } catch { /* мобильные браузеры без поддержки */ }
   }
@@ -2309,6 +2376,19 @@
     if (d.type === 'loggedOut') { S.ws = null; toast('Сеанс завершён на другом устройстве'); setTimeout(() => location.reload(), 1200); return; }
     if (d.type === 'reports') { if (S.admin) { toast('Новая жалоба'); if (S.tab === 'profile') renderProfileTab(); } return; }
     if (d.type === 'blocks') return;
+    if (d.type === 'expiry') {
+      const box = S.msgs.get(d.chatId);
+      for (const m of box?.list || []) if (d.ids.includes(m.id)) m.expiresAt = d.expiresAt;
+      if (S.active === d.chatId) renderMessages('keep');
+      return;
+    }
+    if (d.type === 'messagesGone') {
+      const box = S.msgs.get(d.chatId);
+      if (box) box.list = box.list.filter((m) => !d.ids.includes(m.id));
+      for (const id of d.ids) S.plain.delete(id);
+      if (S.active === d.chatId) renderMessages('keep');
+      return;
+    }
     if (d.type === 'scheduled') {
       const c = S.chats.get(d.chatId);
       if (c) api(`/api/chats/${c.id}/scheduled`).then((r) => { c.scheduled = r.scheduled.length; if (S.active === c.id) renderPinned(); }).catch(() => {});
@@ -3858,6 +3938,10 @@
     openMenu(x, y, [
       isMuted(c) ? ['bell', 'Включить звук', () => setMuted(c, 0)] : ['bellOff', 'Без звука…', () => muteMenu(c)],
       ['image', 'Обои чата', () => modal('Обои: ' + chatTitle(c), [wallPicker(c.id)])],
+      isSecret(c) && ['trash', 'Удалить секретный чат', async () => {
+        if (!confirm('Удалить секретный чат у обоих вместе со всеми сообщениями?')) return;
+        try { await api('/api/chats/' + c.id, { method: 'DELETE' }); } catch (e) { toast(e.message); }
+      }, 'danger'],
       c.archived ? ['leave', 'Вернуть из архива', () => setArchived(c, false)] : ['database', 'В архив', () => setArchived(c, true)],
       ['plus', folders.length ? 'Добавить в папку…' : 'Создать папку с этим чатом', () => {
         if (!folders.length) return editFolder({ id: null, name: '', chatIds: [c.id] });

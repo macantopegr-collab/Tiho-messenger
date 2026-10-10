@@ -934,3 +934,22 @@ mark{background:#FFD34D;color:#141413;border-radius:3px;padding:0 1px}
 .comment-input .send{width:44px;height:44px;flex:none}
 .comment-post{margin:0;padding:8px 12px;border-left:3px solid var(--accent);background:var(--quote-in);border-radius:4px 10px 10px 4px;font-size:13px;color:var(--text-2);max-height:90px;overflow:hidden}
 .thread-panel .composer{width:100%;box-sizing:border-box}
+
+/* ---------- v18: секретные чаты ---------- */
+.secret-lock{color:var(--online);display:inline-flex}
+.secret-title{display:inline-flex;align-items:center;gap:5px;color:var(--online)}
+.ttl-btn{position:relative}
+.ttl-btn.on{color:var(--accent)}
+.ttl-badge{position:absolute;right:2px;bottom:4px;font-size:9px;font-weight:700;background:var(--accent);color:var(--on-accent);border-radius:6px;padding:0 3px;line-height:13px}
+.ttl-left{display:inline-flex;align-items:center;gap:2px;margin-right:4px;color:var(--accent)}
+.out .ttl-left{color:inherit}
+.secret-msgs{user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.secret-msgs img{pointer-events:auto;-webkit-user-drag:none}
+.secret-e2e{align-items:flex-start;text-align:left;max-width:380px}
+body.secret-shield .msgs,body.secret-shield .chat-list .ci-prev{filter:blur(16px);transition:filter .1s}
+.once{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:220px;height:180px;border:0;border-radius:14px;background:repeating-linear-gradient(45deg,var(--quote-in),var(--quote-in) 10px,var(--field) 10px,var(--field) 20px);color:var(--text);cursor:pointer;font:inherit}
+.once small{color:var(--muted);font-size:12px}
+.once.once-mine{width:auto;height:auto;background:none;cursor:default;gap:4px}
+.once-note{display:flex;align-items:center;gap:4px;font-size:12px;opacity:.8}
+.once-viewer img{user-select:none;-webkit-user-drag:none}
+.once-hint{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);color:#fff;background:rgba(0,0,0,.55);padding:6px 12px;border-radius:12px;font-size:13px}
