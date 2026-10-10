@@ -47,7 +47,7 @@ if [ ! -f "$APP/node_modules/.tiho-ok" ] || [ "$APP/package-lock.json" -nt "$APP
 fi
 
 # 3. Туннель Cloudflare (даёт HTTPS-адрес без открытия портов)
-need_cf() { [ -z "${FXTUNNEL_TOKEN:-}" ]; }
+need_cf() { true; }  # cloudflared нужен и как запасной вариант
 if [ -f "$DATA/tiho.env" ]; then set -a; . "$DATA/tiho.env"; set +a; fi
 if need_cf && [ ! -x "$RT/cloudflared" ]; then
   say "Скачиваю cloudflared"
@@ -117,18 +117,23 @@ curl -fsS -o /dev/null "http://127.0.0.1:$PORT/api/config" || { tail -n 20 "$LOG
 say "Открываю HTTPS-адрес"
 : > "$LOGS/tunnel.log"
 OK=""
+USE_FX=""
 if [ -n "${FXTUNNEL_TOKEN:-}" ]; then
+  if curl -fsS --connect-timeout 15 -o /dev/null https://fxtun.ru/ 2>/dev/null; then USE_FX=1
+  else echo "fxtun.ru сейчас недоступен с этого сервера — временно открываю адрес trycloudflare (может понадобиться VPN)"; fi
+fi
+if [ -n "$USE_FX" ]; then
   # fxTunnel — российский сервис, работает без VPN
   FXBIN="$HOME/.local/bin/fxtunnel"
   [ -x "$FXBIN" ] || FXBIN="$RT/fxtunnel"
   if [ ! -x "$FXBIN" ]; then
     say "Скачиваю fxTunnel"
-    if curl -fsSL https://fxtun.ru/install.sh | sh && [ -x "$HOME/.local/bin/fxtunnel" ]; then
+    if curl -fsSL --connect-timeout 20 https://fxtun.ru/install.sh | sh && [ -x "$HOME/.local/bin/fxtunnel" ]; then
       FXBIN="$HOME/.local/bin/fxtunnel"
     else
       # официальный установщик иногда отказывается (нет подписи у свежей сборки) — берём файл напрямую с fxtun.ru
       echo "Установщик не сработал, скачиваю fxTunnel напрямую с fxtun.ru"
-      curl -fsSL -o "$RT/fxtunnel.tmp" "https://fxtun.ru/api/downloads/cli-linux-$CF_ARCH" || die "не удалось скачать fxTunnel"
+      curl -fsSL --connect-timeout 20 -o "$RT/fxtunnel.tmp" "https://fxtun.ru/api/downloads/cli-linux-$CF_ARCH" || die "не удалось скачать fxTunnel"
       chmod +x "$RT/fxtunnel.tmp" && "$RT/fxtunnel.tmp" version >/dev/null 2>&1 || die "скачанный fxTunnel не запускается"
       mv "$RT/fxtunnel.tmp" "$RT/fxtunnel"; FXBIN="$RT/fxtunnel"
     fi
