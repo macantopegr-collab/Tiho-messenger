@@ -736,6 +736,7 @@ app.post('/api/chats/:id/messages', auth, json, (req, res) => {
   q.setRead.run(info.lastInsertRowid, chat.id, req.user.id);
   const msg = messageView(q.messageById.get(info.lastInsertRowid));
   for (const { user_id } of q.memberIds.all(chat.id)) sendTo(user_id, { type: 'message', message: msg, clientId: req.body.clientId });
+  pushMessage(chat.id, req.user.id, 'Новое сообщение');
   res.json({ message: msg });
 });
 
@@ -873,6 +874,58 @@ app.get('/api/files/:id', auth, (req, res) => {
   fs.createReadStream(path.join(FILES_DIR, id)).pipe(res);
 });
 
+/* ---------- Push-уведомления (Web Push, VAPID) ---------- */
+const webpush = require('web-push');
+const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
+let vapid;
+try { vapid = JSON.parse(fs.readFileSync(VAPID_FILE, 'utf8')); } catch {
+  vapid = webpush.generateVAPIDKeys();
+  fs.writeFileSync(VAPID_FILE, JSON.stringify(vapid), { mode: 0o600 });
+}
+webpush.setVapidDetails(process.env.PUSH_CONTACT || 'mailto:admin@tiho.invalid', vapid.publicKey, vapid.privateKey);
+db.exec(`CREATE TABLE IF NOT EXISTS push_subs (
+  endpoint TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL);`);
+app.get('/api/push/key', auth, (req, res) => res.json({ publicKey: vapid.publicKey }));
+app.post('/api/push/subscribe', auth, json, (req, res) => {
+  const s = req.body?.subscription;
+  const ok = s && typeof s.endpoint === 'string' && /^https:\/\//.test(s.endpoint) && s.endpoint.length < 1000 && isB64(s.keys?.p256dh, 200) && isB64(s.keys?.auth, 100);
+  if (!ok) return fail(res, 400, 'Некорректная подписка');
+  db.prepare('INSERT INTO push_subs (endpoint, user_id, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth')
+    .run(s.endpoint, req.user.id, s.keys.p256dh, s.keys.auth, now());
+  res.json({ ok: true });
+});
+app.post('/api/push/unsubscribe', auth, json, (req, res) => {
+  db.prepare('DELETE FROM push_subs WHERE endpoint = ? AND user_id = ?').run(String(req.body?.endpoint || ''), req.user.id);
+  res.json({ ok: true });
+});
+app.post('/api/push/test', auth, (req, res) => {
+  pushTo(req.user.id, { title: 'Тихо', body: 'Push-уведомления работают', tag: 'test', url: '/' }, true);
+  res.json({ ok: true });
+});
+/* Отправляем, только если у человека нет открытого мессенджера (нет WebSocket) */
+function pushTo(userId, payload, force = false) {
+  if (!force && online.has(userId)) return;
+  const subs = db.prepare('SELECT * FROM push_subs WHERE user_id = ?').all(userId);
+  for (const s of subs) {
+    webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, JSON.stringify(payload), { TTL: 3600, urgency: payload.urgent ? 'high' : 'normal' })
+      .catch((e) => { if (e.statusCode === 404 || e.statusCode === 410) db.prepare('DELETE FROM push_subs WHERE endpoint = ?').run(s.endpoint); });
+  }
+}
+function pushMessage(chatId, senderId, kindText) {
+  const chat = q.chatById.get(chatId);
+  const sender = senderId ? q.userById.get(senderId) : null;
+  if (!chat || !sender) return;
+  for (const { user_id } of q.memberIds.all(chatId)) {
+    if (user_id === senderId) continue;
+    pushTo(user_id, {
+      title: chat.type === 'group' ? chat.title : sender.display_name,
+      body: chat.type === 'group' ? `${sender.display_name}: ${kindText}` : kindText,
+      tag: 'chat-' + chatId, url: '/', chatId,
+    });
+  }
+}
+
 /* ---------- Звонки: сервер только передаёт сигналы WebRTC, звук и видео идут напрямую ---------- */
 const TURN_URL = (process.env.TURN_URL || '').trim();
 const TURN_SECRET = (process.env.TURN_SECRET || '').trim();
@@ -929,7 +982,12 @@ function handleCallSignal(user, m) {
     const kind = m.kind === 'video' ? 'video' : 'audio';
     db.prepare('INSERT INTO calls (id, caller_id, callee_id, kind, started_at) VALUES (?, ?, ?, ?, ?)').run(callId, user.id, to, kind, now());
     liveCalls.set(callId, { caller: user.id, callee: to });
-    if (!online.has(to)) { setTimeout(() => finishCall(callId, 'missed'), 100); sendTo(user.id, { type: 'call', from: to, callId, action: 'unavailable' }); return; }
+    if (!online.has(to)) {
+      setTimeout(() => finishCall(callId, 'missed'), 100);
+      sendTo(user.id, { type: 'call', from: to, callId, action: 'unavailable' });
+      pushTo(to, { title: user.display_name, body: kind === 'video' ? '📵 Пропущенный видеозвонок' : '📵 Пропущенный звонок', tag: 'call', url: '/', urgent: true });
+      return;
+    }
   } else {
     const live = liveCalls.get(callId);
     if (!live || ![live.caller, live.callee].includes(user.id) || ![live.caller, live.callee].includes(to)) return;
@@ -1087,6 +1145,7 @@ app.post('/api/channels/:id/posts', auth, json, (req, res) => {
   cq.setRead.run(id, c.id, req.user.id);
   const post = postView(cq.post.get(id), req.user.id);
   chBroadcast(c.id, { type: 'channelPost', channelId: c.id, post });
+  for (const { user_id } of cq.subIds.all(c.id)) if (user_id !== req.user.id) pushTo(user_id, { title: c.title, body: body.text ? body.text.slice(0, 140) : '📷 Фото', tag: 'ch-' + c.id, url: '/c/' + c.slug });
   res.json({ post });
 });
 app.patch('/api/channels/:id/posts/:pid', auth, json, (req, res) => {
@@ -1301,6 +1360,7 @@ app.post('/api/gifts/send', auth, json, (req, res) => {
     })();
   } catch (e) { return giftFail(res, e); }
   const message = deliver(chatId, msgRow);
+  pushMessage(chatId, req.user.id, `🎁 Подарок «${t.name}»`);
   walletPush(req.user.id);
   res.json({ gift: giftView(gq.byId.get(giftId)), chatId, message, wallet: wallet(req.user.id) });
 });

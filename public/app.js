@@ -2092,7 +2092,70 @@
     return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('Не удалось обработать фото'))), 'image/jpeg', 0.86));
   }
 
-  function openNotifications() {
+  /* Push на телефон через Service Worker */
+  function b64ToBytes(b64) {
+    const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+    return Uint8Array.from(atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+  }
+  async function pushState() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return 'unsupported';
+    const reg = await navigator.serviceWorker.ready;
+    return (await reg.pushManager.getSubscription()) ? 'on' : 'off';
+  }
+  async function enablePush() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      toast(/iPhone|iPad/.test(navigator.userAgent) ? 'На iPhone сначала добавьте «Тихо» на экран «Домой» (Поделиться → На экран «Домой»)' : 'Браузер не поддерживает push');
+      return false;
+    }
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { toast('Уведомления запрещены в настройках браузера'); return false; }
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const { publicKey } = await api('/api/push/key');
+      const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(publicKey) });
+      await api('/api/push/subscribe', { body: { subscription: sub.toJSON() } });
+      store.set('tiho-push', true);
+      return true;
+    } catch (e) { toast('Не удалось включить push: ' + (e.message || 'ошибка')); return false; }
+  }
+  async function disablePush() {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) { await api('/api/push/unsubscribe', { body: { endpoint: sub.endpoint } }).catch(() => {}); await sub.unsubscribe(); }
+    } catch { /* уже нет */ }
+    store.set('tiho-push', false);
+  }
+
+  async function openNotifications() {
+    const st = await pushState().catch(() => 'unsupported');
+    const pushSw = h('button', { class: 'sw', role: 'switch', 'aria-checked': String(st === 'on'), 'aria-label': 'Push на телефон', disabled: st === 'unsupported' && !/iPhone|iPad/.test(navigator.userAgent) });
+    pushSw.addEventListener('click', async () => {
+      const on = pushSw.getAttribute('aria-checked') === 'true';
+      if (on) { await disablePush(); pushSw.setAttribute('aria-checked', 'false'); toast('Push выключены'); }
+      else if (await enablePush()) { pushSw.setAttribute('aria-checked', 'true'); toast('Push включены'); }
+    });
+    const pushRow = h('div', { class: 'card' },
+      h('div', { class: 'card-row' }, h('span', { class: 'ic' }, icon('bell', 19, 1.9)),
+        h('span', { class: 'grow' }, h('b', null, 'Push на телефон'), h('small', null, st === 'unsupported' ? 'Браузер не поддерживает. На iPhone — добавьте на экран «Домой»' : 'Сообщения и звонки, даже когда мессенджер закрыт')), pushSw),
+      h('button', { class: 'card-row', onclick: async () => { try { await api('/api/push/test', { method: 'POST' }); toast('Отправили тестовое уведомление'); } catch (e) { toast(e.message); } } },
+        h('span', { class: 'ic' }, icon('send', 19, 1.9)), h('span', { class: 'grow' }, h('b', null, 'Проверить'), h('small', null, 'Прислать тестовое push-уведомление'))));
+    modal('Уведомления', [
+      pushRow,
+      h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'В push видно, от кого сообщение, но не его текст: сервер не может расшифровать переписку.'),
+      h('div', { class: 'section-title' }, 'Пока мессенджер открыт'),
+      h('div', { class: 'card' },
+        settingsSw('tiho-notify', 'Уведомления во вкладке', 'Когда вкладка свёрнута', 'bell', async () => {
+          if (!('Notification' in window)) { toast('Браузер не поддерживает уведомления'); return false; }
+          const p = await Notification.requestPermission();
+          if (p !== 'granted') toast('Уведомления запрещены в настройках браузера');
+          return p === 'granted';
+        }),
+        settingsSw('tiho-notify-text', 'Текст в уведомлениях', 'Показывать содержимое сообщений', 'eye'),
+        settingsSw('tiho-sound', 'Звук', 'Короткий сигнал о новом сообщении', 'volume')),
+    ]);
+  }
+  function openNotificationsOld() {
     const askNotif = async () => {
       if (!('Notification' in window)) { toast('Браузер не поддерживает уведомления'); return false; }
       const p = await Notification.requestPermission();
