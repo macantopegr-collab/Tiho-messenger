@@ -38,6 +38,11 @@
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
     moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>',
     auto: '<circle cx="12" cy="12" r="9"/><path d="M12 3v18a9 9 0 0 0 0-18Z" fill="currentColor"/>',
+    mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
+    trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+    play: '<path d="M7 4v16l13-8Z" fill="currentColor" stroke="none"/>',
+    pause: '<rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/>',
+    link: '<path d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>',
     chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>',
   };
   function icon(name, size = 22, sw = 2) {
@@ -100,7 +105,7 @@
     me: null, priv: null, pub: null, config: { maxFile: 25 * 1024 * 1024 },
     chats: new Map(), msgs: new Map(), plain: new Map(), userKeys: new Map(),
     active: null, filter: 'all', query: '', people: [], typing: new Map(),
-    reply: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
+    reply: null, edit: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
   };
 
   /* ---------- форматирование ---------- */
@@ -179,13 +184,16 @@
     if (p.t === 'file') {
       return { t: 'file', fileId: str(p.fileId, 32), name: str(p.name, 200) || 'файл', size: Number(p.size) || 0,
         mime: str(p.mime, 100), key: str(p.key, 64), iv: str(p.iv, 32), w: Number(p.w) || 0, h: Number(p.h) || 0,
-        caption: str(p.caption, 4000), reply };
+        caption: str(p.caption, 4000), reply,
+        dur: Math.max(0, Math.min(600, Number(p.dur) || 0)),
+        wave: Array.isArray(p.wave) ? p.wave.slice(0, 64).map((v) => Math.max(0, Math.min(1, Number(v) || 0))) : null };
     }
     throw new Error('bad');
   }
 
   async function decryptMsg(msg, chat) {
     if (msg.kind === 'system') return { t: 'system', text: String(msg.body?.text || '') };
+    if (msg.kind === 'deleted') return { t: 'deleted' };
     if (msg.payload) return msg.payload;
     if (S.plain.has(msg.id)) return S.plain.get(msg.id);
     let p;
@@ -200,12 +208,13 @@
     S.plain.set(msg.id, p);
     return p;
   }
-  const plainOf = (msg) => msg.payload || (msg.kind === 'system' ? { t: 'system', text: msg.body?.text || '' } : S.plain.get(msg.id));
+  const plainOf = (msg) => msg.kind === 'deleted' ? { t: 'deleted' } : (S.plain.get(msg.id) || msg.payload || (msg.kind === 'system' ? { t: 'system', text: msg.body?.text || '' } : undefined));
   function previewOf(p) {
     if (!p) return '…';
     if (p.t === 'text') return p.text.replace(/\s+/g, ' ');
-    if (p.t === 'file') return (p.mime.startsWith('image/') ? 'Фото' : 'Файл: ' + p.name) + (p.caption ? ' · ' + p.caption : '');
+    if (p.t === 'file') return (p.mime.startsWith('image/') ? 'Фото' : p.mime.startsWith('audio/') && p.wave ? 'Голосовое сообщение' : 'Файл: ' + p.name) + (p.caption ? ' · ' + p.caption : '');
     if (p.t === 'system') return p.text;
+    if (p.t === 'deleted') return 'Сообщение удалено';
     return p.reason === 'before' ? 'Сообщение до вашего вступления' : 'Не удалось расшифровать';
   }
 
@@ -331,21 +340,118 @@
       'Запомните пароль: восстановить его нельзя, без него старые сообщения не прочитать.')),
     err, submit);
 
+    const gErr = h('div', { class: 'err', role: 'alert', style: 'min-height:0' });
+    const google = S.config.googleClientId ? [
+      h('div', { class: 'or' }, h('span', null, 'или')),
+      googleButton((cred) => onGoogleSignIn(cred, gErr), mode === 'login' ? 'signin_with' : 'signup_with'),
+      gErr,
+    ] : [];
     authShell(
       h('h2', { class: 'auth-title' }, mode === 'login' ? 'С возвращением' : 'Создайте аккаунт'),
       h('p', { class: 'auth-sub' }, mode === 'login' ? 'Войдите, чтобы продолжить переписку' : 'Нужны только логин и пароль'),
       h('div', { class: 'seg', role: 'group', 'aria-label': 'Режим' },
         h('button', { type: 'button', 'aria-pressed': String(mode === 'login'), onclick: () => renderAuth('login') }, 'Вход'),
         h('button', { type: 'button', 'aria-pressed': String(mode === 'register'), onclick: () => renderAuth('register') }, 'Регистрация')),
-      form);
+      form, ...google);
     username.focus();
   }
 
   async function finishLogin(r, kek) {
+    S.me = r.user;
+    if (!kek) {
+      /* Вход через Google: ключ берём с устройства, а если его нет — просим пароль шифрования */
+      const saved = await C.loadKey(r.user.id).catch(() => null);
+      if (saved && saved.publicKey === r.publicKey) { Object.assign(S, { priv: saved.privateKey, pub: saved.publicKey }); return startApp(); }
+      return renderUnlock(r.keyBackup, r.publicKey, true);
+    }
     const priv = await C.unlockIdentity(r.keyBackup, kek);
     await C.saveKey(r.user.id, priv, r.publicKey);
     Object.assign(S, { me: r.user, priv, pub: r.publicKey });
     startApp();
+  }
+
+  /* ---------- Google ---------- */
+  let gsiPromise = null;
+  function loadGsi() {
+    if (window.google?.accounts?.id) return Promise.resolve(window.google);
+    if (!gsiPromise) {
+      gsiPromise = new Promise((resolve, reject) => {
+        const sc = document.createElement('script');
+        sc.src = 'https://accounts.google.com/gsi/client';
+        sc.async = true;
+        sc.onload = () => (window.google?.accounts?.id ? resolve(window.google) : reject(new Error('gsi')));
+        sc.onerror = () => { gsiPromise = null; reject(new Error('Не удалось загрузить вход Google')); };
+        document.head.append(sc);
+      });
+    }
+    return gsiPromise;
+  }
+  const isDark = () => document.documentElement.dataset.theme === 'dark' ||
+    (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+  function googleButton(onCredential, text = 'continue_with') {
+    const box = h('div', { class: 'gbtn' }, h('span', { class: 'muted', style: 'font-size:13px' }, 'Загружаю вход через Google…'));
+    loadGsi().then((g) => {
+      g.accounts.id.initialize({
+        client_id: S.config.googleClientId,
+        callback: (resp) => onCredential(resp.credential),
+        ux_mode: 'popup', auto_select: false, cancel_on_tap_outside: true, itp_support: true,
+      });
+      clear(box);
+      g.accounts.id.renderButton(box, {
+        type: 'standard', theme: isDark() ? 'filled_black' : 'outline', size: 'large', shape: 'pill',
+        text, logo_alignment: 'center', locale: 'ru', width: Math.min(400, Math.max(240, box.clientWidth || 320)),
+      });
+    }).catch((e) => { clear(box).append(h('span', { class: 'err' }, e.message)); });
+    return box;
+  }
+  async function onGoogleSignIn(credential, err) {
+    try {
+      const r = await api('/api/google', { body: { credential } });
+      if (r.need2fa) return renderTwoFactor(r.ticket, 'Google', null);
+      if (r.needSignup) return renderGoogleSignup(r);
+      await finishLogin(r, null);
+    } catch (e) { if (err) err.textContent = e.message; else toast(e.message); }
+  }
+
+  /* Регистрация через Google: логин и пароль шифрования (нужен для переписки на новых устройствах) */
+  function renderGoogleSignup(g) {
+    const err = h('div', { class: 'err', role: 'alert' });
+    const username = h('input', { class: 'input', value: g.username, autocomplete: 'username', autocapitalize: 'none', spellcheck: 'false', required: true });
+    const pw = passwordField({ autocomplete: 'new-password' });
+    const pw2 = passwordField({ autocomplete: 'new-password' });
+    const btn = h('button', { class: 'btn block big', type: 'submit' }, 'Готово');
+    authShell(
+      h('div', { class: 'g-chip' }, h('span', { class: 'g-logo', 'aria-hidden': 'true' }, 'G'), h('span', null, g.email || 'Google-аккаунт')),
+      h('h2', { class: 'auth-title' }, g.name ? `Почти готово, ${g.name.split(' ')[0]}` : 'Почти готово'),
+      h('p', { class: 'auth-sub' }, 'Выберите логин, по которому вас найдут, и придумайте пароль шифрования.'),
+      h('form', { novalidate: true, onsubmit: async (e) => {
+        e.preventDefault();
+        err.textContent = '';
+        const u = username.value.trim().replace(/^@/, '');
+        if (!/^[a-zA-Z0-9_]{3,32}$/.test(u)) { err.textContent = 'Логин: 3–32 символа, латиница, цифры и _'; return; }
+        if (pw.input.value.length < 8) { err.textContent = 'Пароль шифрования — минимум 8 символов'; return; }
+        if (pw.input.value !== pw2.input.value) { err.textContent = 'Пароли не совпадают'; return; }
+        btn.disabled = true; btn.textContent = 'Готовлю ключи шифрования…';
+        try {
+          const { auth, kek } = await C.fromPassword(u, pw.input.value);
+          const id = await C.createIdentity(kek);
+          const r = await api('/api/register', { body: { username: u, displayName: g.name || u, auth, publicKey: id.publicKey, keyBackup: id.backup, googleTicket: g.ticket } });
+          await C.saveKey(r.user.id, id.privateKey, id.publicKey);
+          Object.assign(S, { me: r.user, priv: id.privateKey, pub: id.publicKey });
+          startApp();
+        } catch (e2) {
+          err.textContent = e2.message; btn.disabled = false; btn.textContent = 'Готово';
+          if (e2.status === 401) setTimeout(() => renderAuth('register', e2.message), 1500);
+        }
+      } },
+      h('label', { class: 'field-label' }, 'Логин', username),
+      h('label', { class: 'field-label' }, 'Пароль шифрования', pw.el),
+      h('label', { class: 'field-label' }, 'Повторите пароль', pw2.el),
+      h('div', { class: 'note' }, icon('key', 18), h('span', null,
+        'Входить вы будете через Google. Пароль шифрования понадобится один раз на каждом новом устройстве, чтобы открыть переписку. Восстановить его нельзя.')),
+      err, btn),
+      h('div', { class: 'auth-links' }, h('button', { type: 'button', class: 'link', onclick: () => renderAuth('login') }, 'Отмена')));
+    username.focus();
   }
 
   /* Второй шаг входа: код из Google Authenticator или резервный код */
@@ -388,14 +494,16 @@
   }
 
   /* Сессия есть, но ключа на этом устройстве нет — расшифровываем копию паролем */
-  function renderUnlock(backup, publicKey) {
+  function renderUnlock(backup, publicKey, viaGoogle = false) {
     const err = h('div', { class: 'err', role: 'alert' });
     const pw = passwordField({ autocomplete: 'current-password' });
     const btn = h('button', { class: 'btn block big', type: 'submit' }, 'Разблокировать');
     authShell(
       h('div', { class: 'tfa-badge' }, icon('key', 30)),
       h('h2', { class: 'auth-title' }, `Здравствуйте, ${S.me.displayName}`),
-      h('p', { class: 'auth-sub' }, 'Введите пароль, чтобы расшифровать ключи на этом устройстве.'),
+      h('p', { class: 'auth-sub' }, viaGoogle
+        ? 'Вы вошли через Google. Введите пароль шифрования, чтобы открыть переписку на этом устройстве.'
+        : 'Введите пароль, чтобы расшифровать ключи на этом устройстве.'),
       h('form', { onsubmit: async (e) => {
         e.preventDefault();
         btn.disabled = true; btn.textContent = 'Проверяю…'; err.textContent = '';
@@ -409,7 +517,7 @@
           err.textContent = 'Неверный пароль';
           btn.disabled = false; btn.textContent = 'Разблокировать';
         }
-      } }, h('label', { class: 'field-label' }, 'Пароль', pw.el), err, btn),
+      } }, h('label', { class: 'field-label' }, viaGoogle ? 'Пароль шифрования' : 'Пароль', pw.el), err, btn),
       h('div', { class: 'auth-links' }, h('button', { type: 'button', class: 'link', onclick: logout }, 'Войти в другой аккаунт')));
     pw.input.focus();
   }
@@ -787,7 +895,7 @@
     const senderName = sender?.displayName || 'Бывший участник';
     const showAvatar = chat.type === 'group' && !mine;
 
-    const meta = h('span', { class: 'meta' }, hm(m.createdAt), mine ? readStatus(chat, m) : null);
+    const meta = h('span', { class: 'meta' }, m.editedAt && p.t !== 'deleted' ? h('span', { class: 'edited' }, 'изменено') : null, hm(m.createdAt), mine && p.t !== 'deleted' ? readStatus(chat, m) : null);
     const bubble = h('div', { class: 'bubble' + (lastOfGroup ? ' tail' : ''), 'data-id': m.id });
     if (showAvatar && firstOfGroup) {
       bubble.append(h('span', { class: 'who', style: `color:${NAME_COLORS[(sender?.color ?? m.senderId) % 8]}` }, senderName));
@@ -797,9 +905,13 @@
     }
     if (p.t === 'text') {
       bubble.append(...linkify(p.text), meta);
+    } else if (p.t === 'deleted') {
+      bubble.classList.add('bad');
+      bubble.append(h('span', { class: 'del' }, icon('trash', 15, 1.8), 'Сообщение удалено'), meta);
     } else if (p.t === 'file') {
       bubble.classList.add('media');
-      bubble.append(p.mime.startsWith('image/') ? imageEl(p) : fileEl(p));
+      if (p.mime.startsWith('audio/') && p.wave) bubble.classList.add('voice-b');
+      bubble.append(p.mime.startsWith('image/') ? imageEl(p) : p.mime.startsWith('audio/') && p.wave ? voiceEl(p, mine) : fileEl(p));
       if (p.caption) bubble.append(h('div', { class: 'cap', style: 'white-space:pre-wrap' }, ...linkify(p.caption), meta));
       else bubble.append(h('div', { class: 'cap', style: 'padding-top:0' }, meta));
     } else {
@@ -807,17 +919,31 @@
       bubble.append(p.reason === 'before' ? 'Отправлено до того, как вы вступили в чат' : 'Не удалось расшифровать сообщение', meta);
     }
 
-    const actions = p.t !== 'error' && !m.pending ? h('div', { class: 'msg-actions' },
+    if (m.reactions?.length) {
+      bubble.append(h('div', { class: 'reacts' }, m.reactions.map((r) => {
+        const minex = r.users.includes(S.me.id);
+        const names = r.users.map((id) => memberOf(chat, id)?.displayName || '…').join(', ');
+        return h('button', { class: 'react' + (minex ? ' mine' : ''), title: names, 'aria-label': `${r.emoji} ${r.users.length}: ${names}`,
+          'aria-pressed': String(minex), onclick: () => react(m, r.emoji) }, h('span', { class: 'emo' }, r.emoji), r.users.length > 1 ? String(r.users.length) : '');
+      })));
+    }
+    const live = p.t !== 'error' && p.t !== 'deleted' && !m.pending;
+    const actions = live ? h('div', { class: 'msg-actions' },
       h('button', { 'aria-label': 'Ответить', title: 'Ответить', onclick: () => setReply(m, p, senderName) }, icon('reply', 18)),
       p.t === 'text' ? h('button', { 'aria-label': 'Копировать', title: 'Копировать', onclick: () => copyText(p.text) }, icon('copy', 17)) : null) : null;
-    if (p.t !== 'error' && !m.pending) {
+    if (live) {
       const items = [
         ['reply', 'Ответить', () => setReply(m, p, senderName)],
         p.t === 'text' && ['copy', 'Копировать текст', () => copyText(p.text)],
         p.t === 'file' && ['download', 'Скачать файл', () => downloadFile(p)],
         p.t === 'file' && p.caption && ['copy', 'Копировать подпись', () => copyText(p.caption)],
+        mine && p.t === 'text' && ['edit', 'Изменить', () => setEdit(m, p)],
+        mine && ['trash', 'Удалить у всех', () => deleteMessage(m, p), 'danger'],
       ].filter(Boolean);
+      items.reactions = { list: S.config.reactions || ['👍', '❤️', '😂', '😮', '😢', '🔥'], pick: (e) => react(m, e),
+        mine: m.reactions?.find((r) => r.users.includes(S.me.id))?.emoji };
       bubble.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, items, bubble); });
+      bubble.addEventListener('dblclick', (e) => { if (!e.target.closest('a,button')) react(m, (S.config.reactions || ['👍'])[0]); });
       let timer, sx = 0, sy = 0;
       bubble.addEventListener('touchstart', (e) => {
         sx = e.touches[0].clientX; sy = e.touches[0].clientY;
@@ -842,8 +968,12 @@
     const close = () => { menu.remove(); anchor?.classList.remove('held'); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', esc); };
     const outside = (e) => { if (!menu.contains(e.target)) close(); };
     const esc = (e) => { if (e.key === 'Escape') close(); };
-    const menu = h('div', { class: 'ctx', role: 'menu' }, items.map(([ic, label, fn]) =>
-      h('button', { role: 'menuitem', onclick: () => { close(); fn(); } }, icon(ic, 18), label)));
+    const rx = items.reactions;
+    const menu = h('div', { class: 'ctx', role: 'menu' },
+      rx ? h('div', { class: 'rx-strip' }, rx.list.map((e) => h('button', { class: 'rx' + (rx.mine === e ? ' mine' : ''), 'aria-label': 'Реакция ' + e,
+        onclick: () => { close(); rx.pick(e); } }, e))) : null,
+      items.map(([ic, label, fn, cls]) =>
+        h('button', { role: 'menuitem', class: cls || null, onclick: () => { close(); fn(); } }, icon(ic, 18), label)));
     document.body.append(menu);
     const r = menu.getBoundingClientRect();
     menu.style.left = Math.max(8, Math.min(x, innerWidth - r.width - 8)) + 'px';
@@ -887,6 +1017,45 @@
     }).catch(() => { clear(ph).append(icon('image', 28)); ph.title = 'Не удалось загрузить'; });
     return btn;
   }
+  let playing = null;
+  function voiceEl(p, mine) {
+    const bars = (p.wave && p.wave.length ? p.wave : Array(40).fill(0.3));
+    const wave = h('div', { class: 'vwave', 'aria-hidden': 'true' }, bars.map((v) => h('i', { style: `height:${Math.max(3, Math.round(v * 24))}px` })));
+    const fmt = (t) => Math.floor(t / 60) + ':' + pad(Math.floor(t % 60));
+    const time = h('span', { class: 'vtime' }, fmt(p.dur || 0));
+    const btn = h('button', { class: 'vplay', 'aria-label': 'Воспроизвести голосовое' }, icon('play', 18));
+    const paint = (frac) => { const n = Math.round(frac * bars.length); [...wave.children].forEach((b, i) => b.classList.toggle('on', i < n)); };
+    btn.addEventListener('click', async () => {
+      if (playing && playing.p === p) {
+        if (playing.audio.paused) playing.audio.play(); else playing.audio.pause();
+        return;
+      }
+      if (playing) { playing.audio.pause(); playing.reset(); }
+      clear(btn).append(h('span', { class: 'spin sm' }));
+      try {
+        const url = await getFileUrl(p);
+        const audio = new Audio(url);
+        const reset = () => { clear(btn).append(icon('play', 18)); paint(0); time.textContent = fmt(p.dur || 0); };
+        playing = { p, audio, reset };
+        audio.addEventListener('play', () => { clear(btn).append(icon('pause', 18)); btn.setAttribute('aria-label', 'Пауза'); });
+        audio.addEventListener('pause', () => { clear(btn).append(icon('play', 18)); btn.setAttribute('aria-label', 'Воспроизвести голосовое'); });
+        audio.addEventListener('timeupdate', () => {
+          const d = isFinite(audio.duration) && audio.duration ? audio.duration : (p.dur || 1);
+          paint(audio.currentTime / d); time.textContent = fmt(audio.currentTime);
+        });
+        audio.addEventListener('ended', () => { reset(); playing = null; });
+        await audio.play();
+      } catch { clear(btn).append(icon('play', 18)); toast('Не удалось воспроизвести'); }
+    });
+    wave.addEventListener('click', (e) => {
+      if (!playing || playing.p !== p) return;
+      const r = wave.getBoundingClientRect();
+      const d = isFinite(playing.audio.duration) ? playing.audio.duration : p.dur;
+      playing.audio.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * d;
+    });
+    return h('div', { class: 'voice' + (mine ? ' mine' : '') }, btn, h('div', { class: 'vmid' }, wave, time));
+  }
+
   function fileEl(p) {
     const ext = (p.name.split('.').pop() || 'файл').slice(0, 4);
     return h('button', { class: 'file-card', onclick: () => downloadFile(p), 'aria-label': 'Скачать ' + p.name },
@@ -921,10 +1090,17 @@
     const replyBox = h('div');
     const uploadBox = h('div');
     let lastTyping = 0;
+    const canVoice = !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
     const autosize = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px'; };
+    const actionBtn = h('button', { class: 'send', onclick: () => (input.value.trim() || !canVoice ? submit() : startVoice()) });
+    const syncBtn = () => {
+      const has = !!input.value.trim();
+      clear(actionBtn).append(has || !canVoice || S.edit ? icon(S.edit ? 'check' : 'send', 20, 2.2) : icon('mic', 22, 2));
+      actionBtn.setAttribute('aria-label', has || S.edit ? (S.edit ? 'Сохранить' : 'Отправить') : canVoice ? 'Записать голосовое' : 'Отправить');
+      actionBtn.classList.toggle('idle', !has && (!canVoice || !!S.edit));
+    };
     input.addEventListener('input', () => {
-      autosize();
-      sendBtn.classList.toggle('idle', !input.value.trim());
+      autosize(); syncBtn();
       if (Date.now() - lastTyping > 2500 && input.value.trim()) {
         lastTyping = Date.now();
         wsSend({ type: 'typing', chatId: chat.id });
@@ -932,41 +1108,164 @@
     });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey && !COARSE && !e.isComposing) { e.preventDefault(); submit(); }
-      if (e.key === 'Escape' && S.reply) setReply(null);
+      if (e.key === 'Escape') { if (S.edit) setEdit(null); else if (S.reply) setReply(null); }
     });
     input.addEventListener('paste', (e) => {
       const files = [...(e.clipboardData?.files || [])];
       if (files.length) { e.preventDefault(); sendFiles(files); }
     });
-    const sendBtn = h('button', { class: 'send idle', 'aria-label': 'Отправить', onclick: () => submit() }, icon('send', 20, 2.2));
     const submit = () => {
       const text = input.value.trim();
       if (!text) return;
       input.value = '';
       autosize();
-      sendBtn.classList.add('idle');
-      sendPayload({ t: 'text', text });
+      if (S.edit) saveEdit(text); else sendPayload({ t: 'text', text });
+      syncBtn();
       if (!COARSE) input.focus();
     };
-    const el = h('div', { class: 'composer-wrap' }, replyBox, uploadBox,
-      h('div', { class: 'composer' },
-        h('button', { class: 'icon-btn', style: 'color:var(--muted)', 'aria-label': 'Прикрепить фото или файл', title: 'Прикрепить', onclick: () => fileInput.click() }, icon('attach', 24, 1.8)),
-        h('label', { class: 'field' }, input),
-        sendBtn,
-        fileInput));
-    return { el, input, replyBox, uploadBox };
+    const attachBtn = h('button', { class: 'icon-btn', style: 'color:var(--muted)', 'aria-label': 'Прикрепить фото или файл', title: 'Прикрепить', onclick: () => fileInput.click() }, icon('attach', 24, 1.8));
+    const row = h('div', { class: 'composer' }, attachBtn, h('label', { class: 'field' }, input), actionBtn, fileInput);
+    const el = h('div', { class: 'composer-wrap' }, replyBox, uploadBox, row);
+
+    /* Голосовое сообщение */
+    async function startVoice() {
+      let stream;
+      try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+      catch { toast('Нет доступа к микрофону. Разрешите его в настройках браузера'); return; }
+      const mime = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg;codecs=opus'].find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      const chunks = [];
+      const levels = [];
+      let ctx, analyser, data, raf, cancelled = false;
+      try {
+        ctx = new AudioContext();
+        analyser = ctx.createAnalyser();
+        analyser.fftSize = 512;
+        ctx.createMediaStreamSource(stream).connect(analyser);
+        data = new Uint8Array(analyser.fftSize);
+      } catch { /* волна необязательна */ }
+      const t0 = Date.now();
+      const timer = h('span', { class: 'rec-time' }, '0:00');
+      const live = h('div', { class: 'rec-wave', 'aria-hidden': 'true' });
+      const tick = () => {
+        const sec = Math.floor((Date.now() - t0) / 1000);
+        timer.textContent = Math.floor(sec / 60) + ':' + pad(sec % 60);
+        if (analyser) {
+          analyser.getByteTimeDomainData(data);
+          let peak = 0;
+          for (const v of data) peak = Math.max(peak, Math.abs(v - 128));
+          const lvl = Math.min(1, peak / 64);
+          levels.push(lvl);
+          live.append(h('i', { style: `height:${Math.max(3, Math.round(lvl * 26))}px` }));
+          while (live.children.length > 60) live.firstChild.remove();
+        }
+        if (sec >= 300) stop(false);
+        else raf = setTimeout(tick, 100);
+      };
+      const finish = () => { clearTimeout(raf); stream.getTracks().forEach((t) => t.stop()); ctx?.close?.(); el.replaceChild(row, recRow); };
+      const stop = (cancel) => { cancelled = cancel; if (rec.state !== 'inactive') rec.stop(); };
+      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      rec.onstop = () => {
+        finish();
+        const dur = Math.round((Date.now() - t0) / 100) / 10;
+        if (cancelled || dur < 0.7) { if (!cancelled) toast('Слишком короткое голосовое'); return; }
+        const type = (rec.mimeType || mime || 'audio/webm').split(';')[0];
+        const n = 40, wave = [];
+        for (let i = 0; i < n; i++) {
+          const part = levels.slice(Math.floor(i * levels.length / n), Math.floor((i + 1) * levels.length / n) || undefined);
+          wave.push(Math.round((part.length ? Math.max(...part) : 0.1) * 100) / 100);
+        }
+        const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
+        sendFiles([new File(chunks, `voice-${Date.now()}.${ext}`, { type })], { voice: { dur, wave } });
+      };
+      const recRow = h('div', { class: 'composer rec' },
+        h('button', { class: 'icon-btn', 'aria-label': 'Отменить запись', title: 'Отменить', onclick: () => stop(true) }, icon('trash', 22, 1.8)),
+        h('div', { class: 'rec-body' }, h('span', { class: 'rec-dot' }), timer, live),
+        h('button', { class: 'send', 'aria-label': 'Отправить голосовое', onclick: () => stop(false) }, icon('send', 20, 2.2)));
+      el.replaceChild(recRow, row);
+      rec.start(250);
+      tick();
+    }
+
+    syncBtn();
+    return { el, input, replyBox, uploadBox, syncBtn, autosize };
   }
 
   function setReply(m, p, name) {
     const c = S.refs.composer;
     if (!c) return;
     clear(c.replyBox);
-    if (!m) { S.reply = null; return; }
+    if (S.edit && m) { S.edit = null; c.input.value = ''; c.autosize(); }
+    if (!m) { S.reply = null; c.syncBtn(); return; }
     S.reply = { id: m.id, name, text: previewOf(p).slice(0, 120) };
-    c.replyBox.append(h('div', { class: 'reply-bar' },
+    c.replyBox.append(h('div', { class: 'reply-bar' }, icon('reply', 20),
       h('div', null, h('b', null, 'Ответ: ' + name), h('span', null, S.reply.text)),
       h('button', { class: 'icon-btn', 'aria-label': 'Отменить ответ', onclick: () => setReply(null) }, icon('close', 20))));
+    c.syncBtn();
     c.input.focus();
+  }
+
+  /* Правка своего сообщения */
+  function setEdit(m, p) {
+    const c = S.refs.composer;
+    if (!c) return;
+    clear(c.replyBox);
+    S.reply = null;
+    if (!m) { S.edit = null; c.input.value = ''; c.autosize(); c.syncBtn(); return; }
+    S.edit = { id: m.id, payload: p };
+    c.replyBox.append(h('div', { class: 'reply-bar' }, icon('edit', 20),
+      h('div', null, h('b', null, 'Редактирование'), h('span', null, p.text.slice(0, 120))),
+      h('button', { class: 'icon-btn', 'aria-label': 'Отменить редактирование', onclick: () => setEdit(null) }, icon('close', 20))));
+    c.input.value = p.text;
+    c.autosize(); c.syncBtn();
+    c.input.focus();
+    c.input.setSelectionRange(c.input.value.length, c.input.value.length);
+  }
+  async function saveEdit(text) {
+    const ed = S.edit;
+    const chat = S.chats.get(S.active);
+    setEdit(null);
+    if (!ed || !chat || text === ed.payload.text) return;
+    const payload = { t: 'text', text, reply: ed.payload.reply || undefined };
+    try {
+      const envelope = await C.encryptMessage(payload, {
+        chatId: chat.id, senderId: S.me.id, senderPriv: S.priv,
+        recipients: chat.members.map((m) => ({ id: m.id, publicKey: m.id === S.me.id ? S.pub : m.publicKey })),
+      });
+      S.plain.set(ed.id, cleanPayload(payload));
+      const { message } = await api('/api/messages/' + ed.id, { method: 'PATCH', body: { envelope } });
+      applyUpdated(message, payload);
+    } catch (e) { toast('Не сохранено: ' + e.message); }
+  }
+  async function deleteMessage(m, p) {
+    if (!confirm('Удалить сообщение у всех участников чата?')) return;
+    try {
+      const { message } = await api('/api/messages/' + m.id, { method: 'DELETE', body: { fileId: p.t === 'file' ? p.fileId : undefined } });
+      applyUpdated(message);
+    } catch (e) { toast(e.message); }
+  }
+  async function react(m, emoji) {
+    try {
+      const { reactions } = await api(`/api/messages/${m.id}/react`, { body: { emoji } });
+      applyReactions(m.chatId, m.id, reactions);
+    } catch (e) { toast(e.message); }
+  }
+  async function applyUpdated(msg, payload) {
+    const chat = S.chats.get(msg.chatId);
+    if (!chat) return;
+    S.plain.delete(msg.id);
+    if (payload) S.plain.set(msg.id, cleanPayload(payload)); else await decryptMsg(msg, chat);
+    const box = S.msgs.get(chat.id);
+    if (box) { const i = box.list.findIndex((x) => x.id === msg.id); if (i >= 0) box.list[i] = msg; }
+    if (chat.lastMessage?.id === msg.id) chat.lastMessage = msg;
+    renderList();
+    if (S.active === chat.id) renderMessages();
+  }
+  function applyReactions(chatId, messageId, reactions) {
+    const box = S.msgs.get(chatId);
+    const m = box?.list.find((x) => x.id === messageId);
+    if (m) m.reactions = reactions;
+    if (S.active === chatId) renderMessages();
   }
 
   function renderUploads() {
@@ -1002,12 +1301,12 @@
     }
   }
 
-  async function sendFiles(files) {
+  async function sendFiles(files, opts = {}) {
     const chatId = S.active;
     if (!chatId || !files.length) return;
     const input = S.refs.composer?.input;
     let caption = '';
-    if (files.length === 1 && input?.value.trim()) { caption = input.value.trim(); input.value = ''; input.style.height = 'auto'; }
+    if (files.length === 1 && !opts.voice && input?.value.trim()) { caption = input.value.trim(); input.value = ''; input.style.height = 'auto'; }
     for (const file of files) {
       if (file.size > S.config.maxFile) { toast(`«${file.name}» больше ${fileSize(S.config.maxFile)}`); continue; }
       S.uploads++; renderUploads();
@@ -1020,7 +1319,7 @@
         const encd = await C.encryptFile(buf);
         const { id } = await api('/api/files?chatId=' + chatId, { raw: encd.data });
         await sendPayload({ t: 'file', fileId: id, name: file.name, size: file.size, mime: file.type || 'application/octet-stream',
-          key: encd.key, iv: encd.iv, w, h: hh, caption }, chatId);
+          key: encd.key, iv: encd.iv, w, h: hh, caption, ...(opts.voice || {}) }, chatId);
         caption = '';
       } catch (e) { toast('Файл не отправлен: ' + e.message); }
       S.uploads--; renderUploads();
@@ -1122,6 +1421,8 @@
       renderList(); updateTitle();
       return;
     }
+    if (d.type === 'messageUpdated') return applyUpdated(d.message);
+    if (d.type === 'reactions') return applyReactions(d.chatId, d.messageId, d.reactions);
     if (d.type === 'chatRemoved') {
       S.chats.delete(d.chatId); S.msgs.delete(d.chatId);
       if (S.active === d.chatId) closeChat(); else renderList();
@@ -1344,6 +1645,15 @@
       h('span', { class: 'grow' }, h('b', null, 'Google Authenticator'),
         h('small', null, info.twoFactor ? `Код при входе · резервных кодов: ${info.backupLeft}` : 'Код из приложения при каждом входе')),
       h('span', { class: 'chip-status' + (info.twoFactor ? ' on' : '') }, info.twoFactor ? 'Включено' : 'Выключено'));
+    const gRow = S.config.googleClientId ? h('button', { class: 'card-row', onclick: async () => {
+      if (info.google) {
+        if (!confirm('Отвязать Google? Входить можно будет по логину и паролю.')) return;
+        try { await api('/api/google/unlink', { method: 'POST' }); close(); toast('Google отвязан'); } catch (e) { toast(e.message); }
+      } else { close(); openLinkGoogle(); }
+    } },
+      h('span', { class: 'ic g-ic' }, h('span', { class: 'g-logo' }, 'G')),
+      h('span', { class: 'grow' }, h('b', null, 'Вход через Google'), h('small', null, info.google ? String(info.google) : 'Входите в один клик')),
+      h('span', { class: 'chip-status' + (info.google ? ' on' : '') }, info.google ? 'Привязан' : 'Привязать')) : null;
     const section = (title, ...kids) => h('div', { class: 'section' }, h('div', { class: 'section-title' }, title), ...kids);
 
     const close = modal('Настройки', [
@@ -1351,7 +1661,7 @@
         h('div', { style: 'min-width:0' }, h('b', null, S.me.displayName), h('span', { class: 'muted' }, '@' + S.me.username))),
       section('Профиль', h('div', { class: 'card', style: 'padding:14px 16px' },
         h('label', { class: 'field-label' }, 'Имя, которое видят другие', h('div', { style: 'display:flex;gap:8px' }, nameInput, saveName)))),
-      section('Безопасность', h('div', { class: 'card' }, tfaRow)),
+      section('Безопасность', h('div', { class: 'card' }, gRow, tfaRow)),
       section('Оформление', themeSeg),
       section('Уведомления', h('div', { class: 'card' },
         sw('tiho-notify', 'Уведомления', 'Когда вкладка свёрнута', 'bell', askNotif),
@@ -1362,6 +1672,18 @@
         h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' },
           'Ключи хранятся только на ваших устройствах. Сервер передаёт зашифрованные сообщения и файлы и не может их расшифровать.'))),
       h('button', { class: 'btn danger block', onclick: logout }, icon('logout', 18), 'Выйти из аккаунта'),
+    ]);
+  }
+
+  function openLinkGoogle() {
+    const err = h('div', { class: 'err', role: 'alert' });
+    const close = modal('Вход через Google', [
+      h('p', { class: 'muted', style: 'margin:0;line-height:1.45' }, 'Привяжите Google-аккаунт, чтобы входить в один клик. Пароль шифрования по-прежнему понадобится на новых устройствах.'),
+      googleButton(async (credential) => {
+        try { const r = await api('/api/google/link', { body: { credential } }); close(); toast('Google привязан: ' + r.email); }
+        catch (e) { err.textContent = e.message; }
+      }, 'continue_with'),
+      err,
     ]);
   }
 

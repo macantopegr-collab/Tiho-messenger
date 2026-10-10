@@ -79,9 +79,13 @@ HOST=127.0.0.1
 DATA_DIR=$DATA_DIR
 # Максимальный размер файла, МБ
 MAX_FILE_MB=25
+# Вход через Google: Client ID из Google Cloud Console (см. ИНСТРУКЦИЯ.md)
+GOOGLE_CLIENT_ID=
 EOF
   chmod 600 "$ENV_FILE"
 fi
+
+grep -q '^GOOGLE_CLIENT_ID=' "$ENV_FILE" || printf '\n# Вход через Google: Client ID из Google Cloud Console\nGOOGLE_CLIENT_ID=\n' >> "$ENV_FILE"
 
 say "Настраиваю автозапуск"
 cat > /etc/systemd/system/tiho.service <<EOF

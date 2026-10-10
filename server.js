@@ -18,6 +18,8 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const FILES_DIR = path.join(DATA_DIR, 'files');
+const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
+const GOOGLE_JWKS_URL = process.env.GOOGLE_JWKS_URL || 'https://www.googleapis.com/oauth2/v3/certs';
 const MAX_FILE = Number(process.env.MAX_FILE_MB || 25) * 1024 * 1024;
 const SESSION_DAYS = 60;
 
@@ -87,6 +89,16 @@ CREATE TABLE IF NOT EXISTS files (
   if (!cols.has('totp_pending')) db.exec('ALTER TABLE users ADD COLUMN totp_pending TEXT');
   if (!cols.has('totp_last_step')) db.exec('ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0');
   if (!cols.has('backup_codes')) db.exec("ALTER TABLE users ADD COLUMN backup_codes TEXT NOT NULL DEFAULT '[]'");
+  if (!cols.has('google_sub')) db.exec('ALTER TABLE users ADD COLUMN google_sub TEXT');
+  if (!cols.has('email')) db.exec('ALTER TABLE users ADD COLUMN email TEXT');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google ON users(google_sub) WHERE google_sub IS NOT NULL');
+  const mcols = new Set(db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name));
+  if (!mcols.has('edited_at')) db.exec('ALTER TABLE messages ADD COLUMN edited_at INTEGER');
+  db.exec(`CREATE TABLE IF NOT EXISTS reactions (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    emoji TEXT NOT NULL,
+    PRIMARY KEY (message_id, user_id))`);
 }
 
 const now = () => Date.now();
@@ -136,6 +148,17 @@ q.enableTotp = db.prepare('UPDATE users SET totp_secret = ?, totp_pending = NULL
 q.disableTotp = db.prepare("UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_last_step = 0, backup_codes = '[]' WHERE id = ?");
 q.setTotpStep = db.prepare('UPDATE users SET totp_last_step = ? WHERE id = ?');
 q.setBackupCodes = db.prepare('UPDATE users SET backup_codes = ? WHERE id = ?');
+
+q.userByGoogle = db.prepare('SELECT * FROM users WHERE google_sub = ?');
+q.setGoogle = db.prepare('UPDATE users SET google_sub = ?, email = ? WHERE id = ?');
+q.updateMessage = db.prepare('UPDATE messages SET body = ?, edited_at = ? WHERE id = ?');
+q.deleteMessage = db.prepare("UPDATE messages SET kind = 'deleted', body = '{}', edited_at = ? WHERE id = ?");
+q.reactionOf = db.prepare('SELECT emoji FROM reactions WHERE message_id = ? AND user_id = ?');
+q.setReaction = db.prepare('INSERT INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?) ON CONFLICT(message_id, user_id) DO UPDATE SET emoji = excluded.emoji');
+q.delReaction = db.prepare('DELETE FROM reactions WHERE message_id = ? AND user_id = ?');
+q.clearReactions = db.prepare('DELETE FROM reactions WHERE message_id = ?');
+q.reactionsOf = db.prepare('SELECT emoji, user_id FROM reactions WHERE message_id = ? ORDER BY rowid');
+q.deleteFile = db.prepare('DELETE FROM files WHERE id = ?');
 
 setInterval(() => q.purgeSessions.run(now()), 6 * 3600 * 1000).unref();
 
@@ -223,9 +246,24 @@ const memberView = (m) => ({
   id: m.id, username: m.username, displayName: m.display_name, color: m.color,
   publicKey: m.public_key, lastReadId: m.last_read_id, online: online.has(m.id),
 });
-const messageView = (m) => ({
+const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
+function reactionsFor(ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  const rows = db.prepare(`SELECT message_id, emoji, user_id FROM reactions WHERE message_id IN (${ids.map(() => '?').join(',')}) ORDER BY rowid`).all(...ids);
+  for (const r of rows) {
+    if (!out.has(r.message_id)) out.set(r.message_id, new Map());
+    const m = out.get(r.message_id);
+    if (!m.has(r.emoji)) m.set(r.emoji, []);
+    m.get(r.emoji).push(r.user_id);
+  }
+  return out;
+}
+const reactionList = (map) => (map ? [...map].map(([emoji, users]) => ({ emoji, users })) : []);
+const messageView = (m, reactions) => ({
   id: m.id, chatId: m.chat_id, senderId: m.sender_id, kind: m.kind,
-  body: m.kind === 'msg' ? JSON.parse(m.body) : JSON.parse(m.body), createdAt: m.created_at,
+  body: JSON.parse(m.body), createdAt: m.created_at, editedAt: m.edited_at || null,
+  reactions: reactionList(reactions),
 });
 
 function chatView(chat, userId) {
@@ -267,8 +305,9 @@ app.use((req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Content-Security-Policy',
     "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; " +
-    "style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src https://fonts.gstatic.com; " +
-    "connect-src 'self' ws: wss:; script-src 'self'; frame-ancestors 'none'; base-uri 'none'");
+    "style-src 'self' https://fonts.googleapis.com https://accounts.google.com 'unsafe-inline'; font-src https://fonts.gstatic.com; " +
+    "connect-src 'self' ws: wss: https://accounts.google.com; script-src 'self' https://accounts.google.com/gsi/client; " +
+    "frame-src https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'");
   next();
 });
 
@@ -290,19 +329,98 @@ const fail = (res, code, error) => res.status(code).json({ error });
 
 const json = express.json({ limit: '256kb' });
 
-app.get('/api/config', (req, res) => res.json({ maxFile: MAX_FILE }));
+app.get('/api/config', (req, res) => res.json({ maxFile: MAX_FILE, googleClientId: GOOGLE_CLIENT_ID || null, reactions: REACTIONS }));
+
+/* ---------- Вход через Google (проверка ID-токена Google Identity Services) ---------- */
+let jwks = { keys: [], exp: 0 };
+async function googleKeys(force = false) {
+  if (!force && jwks.exp > now() && jwks.keys.length) return jwks.keys;
+  const r = await fetch(GOOGLE_JWKS_URL);
+  if (!r.ok) throw new Error('Google недоступен');
+  const maxAge = Number(/max-age=(\d+)/.exec(r.headers.get('cache-control') || '')?.[1] || 3600);
+  jwks = { keys: (await r.json()).keys || [], exp: now() + Math.min(maxAge, 86400) * 1000 };
+  return jwks.keys;
+}
+async function verifyGoogle(credential) {
+  const parts = String(credential || '').split('.');
+  if (parts.length !== 3) throw new Error('bad token');
+  const header = JSON.parse(Buffer.from(parts[0], 'base64url'));
+  const payload = JSON.parse(Buffer.from(parts[1], 'base64url'));
+  if (header.alg !== 'RS256') throw new Error('bad alg');
+  let jwk = (await googleKeys()).find((k) => k.kid === header.kid);
+  if (!jwk) jwk = (await googleKeys(true)).find((k) => k.kid === header.kid);
+  if (!jwk) throw new Error('unknown key');
+  const key = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+  const ok = crypto.verify('RSA-SHA256', Buffer.from(parts[0] + '.' + parts[1]), key, Buffer.from(parts[2], 'base64url'));
+  if (!ok) throw new Error('bad signature');
+  if (!['accounts.google.com', 'https://accounts.google.com'].includes(payload.iss)) throw new Error('bad iss');
+  if (payload.aud !== GOOGLE_CLIENT_ID) throw new Error('bad aud');
+  if (!payload.exp || payload.exp * 1000 < now() - 60000) throw new Error('expired');
+  if (!payload.sub || payload.email_verified === false) throw new Error('email not verified');
+  return payload;
+}
+const googleSignups = new Map();
+setInterval(() => { const t = now(); for (const [k, v] of googleSignups) if (v.exp < t) googleSignups.delete(k); }, 60000).unref();
+function suggestUsername(email, name) {
+  let base = String(email || '').split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  if (base.length < 3) base = 'user';
+  base = base.slice(0, 26);
+  if (!q.userByName.get(base)) return base;
+  for (let i = 0; i < 50; i++) { const c = base + '_' + crypto.randomInt(10, 9999); if (!q.userByName.get(c)) return c; }
+  return 'user_' + crypto.randomBytes(4).toString('hex');
+}
+function loginOrTicket(req, res, user) {
+  if (user.totp_secret) {
+    const ticket = crypto.randomBytes(24).toString('base64url');
+    loginTickets.set(ticket, { userId: user.id, exp: now() + 5 * 60000, tries: 0 });
+    return res.json({ need2fa: true, ticket });
+  }
+  startSession(req, res, user.id);
+  res.json({ user: publicUser(user), publicKey: user.public_key, keyBackup: JSON.parse(user.key_backup) });
+}
+
+app.post('/api/google', json, async (req, res) => {
+  if (!GOOGLE_CLIENT_ID) return fail(res, 400, 'Вход через Google не настроен на сервере');
+  if (rateLimited('google:' + req.ip, 30)) return fail(res, 429, 'Слишком много попыток, подождите');
+  let g;
+  try { g = await verifyGoogle(req.body?.credential); } catch (e) { console.warn('Google sign-in rejected:', e.message); return fail(res, 401, 'Google не подтвердил вход, попробуйте ещё раз'); }
+  const user = q.userByGoogle.get(g.sub);
+  if (user) return loginOrTicket(req, res, user);
+  const ticket = crypto.randomBytes(24).toString('base64url');
+  googleSignups.set(ticket, { sub: g.sub, email: g.email || null, name: cleanName(g.name) || null, exp: now() + 15 * 60000 });
+  res.json({ needSignup: true, ticket, username: suggestUsername(g.email, g.name), name: cleanName(g.name) || '', email: g.email || '' });
+});
+
+app.post('/api/google/link', auth, json, async (req, res) => {
+  if (!GOOGLE_CLIENT_ID) return fail(res, 400, 'Вход через Google не настроен на сервере');
+  let g;
+  try { g = await verifyGoogle(req.body?.credential); } catch { return fail(res, 401, 'Google не подтвердил вход'); }
+  const other = q.userByGoogle.get(g.sub);
+  if (other && other.id !== req.user.id) return fail(res, 409, 'Этот Google-аккаунт уже привязан к другому пользователю');
+  q.setGoogle.run(g.sub, g.email || null, req.user.id);
+  res.json({ ok: true, email: g.email || '' });
+});
+
+app.post('/api/google/unlink', auth, (req, res) => {
+  q.setGoogle.run(null, null, req.user.id);
+  res.json({ ok: true });
+});
 
 app.post('/api/register', json, (req, res) => {
   if (rateLimited('reg:' + req.ip, 10)) return fail(res, 429, 'Слишком много попыток, подождите');
-  const { username, displayName, auth: authKey, publicKey, keyBackup } = req.body || {};
+  const { username, displayName, auth: authKey, publicKey, keyBackup, googleTicket } = req.body || {};
   if (!USERNAME_RE.test(username || '')) return fail(res, 400, 'Логин: 3–32 символа, латиница, цифры и _');
-  const name = cleanName(displayName) || username;
+  const g = googleTicket ? googleSignups.get(String(googleTicket)) : null;
+  if (googleTicket && (!g || g.exp < now())) return fail(res, 401, 'Время регистрации через Google истекло, начните заново');
+  if (g && q.userByGoogle.get(g.sub)) return fail(res, 409, 'Этот Google-аккаунт уже зарегистрирован');
+  const name = cleanName(displayName) || g?.name || username;
   if (!isB64(authKey, 200) || !isB64(publicKey, 400)) return fail(res, 400, 'Некорректные данные ключа');
   if (!keyBackup || !isB64(keyBackup.iv, 64) || !isB64(keyBackup.ct, 1000)) return fail(res, 400, 'Некорректная резервная копия ключа');
   if (q.userByName.get(username)) return fail(res, 409, 'Этот логин уже занят');
   const hash = bcrypt.hashSync(authKey, 11);
   const color = crypto.randomInt(0, 8);
   const info = q.insertUser.run(username, name, hash, publicKey, JSON.stringify({ iv: keyBackup.iv, ct: keyBackup.ct }), color, now());
+  if (g) { q.setGoogle.run(g.sub, g.email, info.lastInsertRowid); googleSignups.delete(String(googleTicket)); }
   startSession(req, res, info.lastInsertRowid);
   res.json({ user: publicUser(q.userById.get(info.lastInsertRowid)) });
 });
@@ -314,13 +432,7 @@ app.post('/api/login', json, (req, res) => {
   if (!user || typeof authKey !== 'string' || !bcrypt.compareSync(authKey, user.pass_hash)) {
     return fail(res, 401, 'Неверный логин или пароль');
   }
-  if (user.totp_secret) {
-    const ticket = crypto.randomBytes(24).toString('base64url');
-    loginTickets.set(ticket, { userId: user.id, exp: now() + 5 * 60000, tries: 0 });
-    return res.json({ need2fa: true, ticket });
-  }
-  startSession(req, res, user.id);
-  res.json({ user: publicUser(user), publicKey: user.public_key, keyBackup: JSON.parse(user.key_backup) });
+  loginOrTicket(req, res, user);
 });
 
 app.post('/api/login/2fa', json, (req, res) => {
@@ -348,6 +460,7 @@ app.post('/api/logout', (req, res) => {
 
 app.get('/api/me', auth, (req, res) => {
   res.json({ user: publicUser(req.user), publicKey: req.user.public_key, keyBackup: JSON.parse(req.user.key_backup),
+    google: req.user.google_sub ? (req.user.email || 'привязан') : null,
     twoFactor: !!req.user.totp_secret, backupLeft: JSON.parse(req.user.backup_codes || '[]').length });
 });
 
@@ -491,7 +604,8 @@ app.get('/api/chats/:id/messages', auth, (req, res) => {
   const before = Number(req.query.before) || Number.MAX_SAFE_INTEGER;
   const limit = Math.min(Number(req.query.limit) || 50, 100);
   const rows = q.messagesBefore.all(chat.id, before, limit).reverse();
-  res.json({ messages: rows.map(messageView) });
+  const rx = reactionsFor(rows.map((r) => r.id));
+  res.json({ messages: rows.map((r) => messageView(r, rx.get(r.id))) });
 });
 
 function validEnvelope(e) {
@@ -509,6 +623,53 @@ app.post('/api/chats/:id/messages', auth, json, (req, res) => {
   const msg = messageView(q.messageById.get(info.lastInsertRowid));
   for (const { user_id } of q.memberIds.all(chat.id)) sendTo(user_id, { type: 'message', message: msg, clientId: req.body.clientId });
   res.json({ message: msg });
+});
+
+/* Правка, удаление и реакции */
+function ownMessage(req, res) {
+  const m = q.messageById.get(Number(req.params.id));
+  if (!m || !q.isMember.get(m.chat_id, req.user.id)) { fail(res, 404, 'Сообщение не найдено'); return null; }
+  return m;
+}
+function broadcastMessage(m) {
+  const view = messageView(m, reactionsFor([m.id]).get(m.id));
+  for (const { user_id } of q.memberIds.all(m.chat_id)) sendTo(user_id, { type: 'messageUpdated', message: view });
+  return view;
+}
+app.patch('/api/messages/:id', auth, json, (req, res) => {
+  const m = ownMessage(req, res); if (!m) return;
+  if (m.sender_id !== req.user.id || m.kind !== 'msg') return fail(res, 403, 'Можно менять только свои сообщения');
+  if (!validEnvelope(req.body?.envelope)) return fail(res, 400, 'Некорректное зашифрованное сообщение');
+  q.updateMessage.run(JSON.stringify(req.body.envelope), now(), m.id);
+  res.json({ message: broadcastMessage(q.messageById.get(m.id)) });
+});
+app.delete('/api/messages/:id', auth, json, (req, res) => {
+  const m = ownMessage(req, res); if (!m) return;
+  if (m.sender_id !== req.user.id || m.kind !== 'msg') return fail(res, 403, 'Можно удалять только свои сообщения');
+  const fileId = String(req.body?.fileId || '');
+  if (/^[a-f0-9]{32}$/.test(fileId)) {
+    const f = q.fileById.get(fileId);
+    if (f && f.uploader_id === req.user.id && f.chat_id === m.chat_id) {
+      try { fs.unlinkSync(path.join(FILES_DIR, fileId)); } catch { /* уже нет */ }
+      q.deleteFile.run(fileId);
+    }
+  }
+  db.transaction(() => { q.clearReactions.run(m.id); q.deleteMessage.run(now(), m.id); })();
+  const view = broadcastMessage(q.messageById.get(m.id));
+  for (const { user_id } of q.memberIds.all(m.chat_id)) { const c = fullChat(m.chat_id, user_id); if (c) sendTo(user_id, { type: 'chat', chat: c }); }
+  res.json({ message: view });
+});
+app.post('/api/messages/:id/react', auth, json, (req, res) => {
+  const m = ownMessage(req, res); if (!m) return;
+  if (m.kind !== 'msg') return fail(res, 400, 'Нельзя');
+  const emoji = String(req.body?.emoji || '');
+  if (emoji && !REACTIONS.includes(emoji)) return fail(res, 400, 'Такой реакции нет');
+  const cur = q.reactionOf.get(m.id, req.user.id)?.emoji;
+  if (!emoji || cur === emoji) q.delReaction.run(m.id, req.user.id);
+  else q.setReaction.run(m.id, req.user.id, emoji);
+  const reactions = reactionList(reactionsFor([m.id]).get(m.id));
+  for (const { user_id } of q.memberIds.all(m.chat_id)) sendTo(user_id, { type: 'reactions', chatId: m.chat_id, messageId: m.id, reactions });
+  res.json({ reactions });
 });
 
 app.post('/api/chats/:id/read', auth, json, (req, res) => {

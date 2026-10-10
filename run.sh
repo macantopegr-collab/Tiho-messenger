@@ -57,9 +57,23 @@ fi
 # 4. Настройки
 ENV_FILE="$DATA/tiho.env"
 if [ ! -f "$ENV_FILE" ]; then
-  printf '# Настройки «Тихо». После изменения: bash run.sh\nMAX_FILE_MB=25\n' > "$ENV_FILE"
+  cat > "$ENV_FILE" <<'EOF2'
+# Настройки «Тихо». После изменения выполните: bash run.sh
+MAX_FILE_MB=25
+
+# Вход через Google: Client ID из Google Cloud Console (см. ИНСТРУКЦИЯ.md)
+GOOGLE_CLIENT_ID=
+
+# Постоянный адрес через свой домен в Cloudflare (см. ИНСТРУКЦИЯ.md).
+# Без этих строк адрес временный и меняется при каждом запуске.
+CF_TUNNEL_TOKEN=
+PUBLIC_URL=
+EOF2
   chmod 600 "$ENV_FILE"
 fi
+# Старые настройки дополняем новыми полями
+grep -q '^GOOGLE_CLIENT_ID=' "$ENV_FILE" || printf '\n# Вход через Google: Client ID из Google Cloud Console (см. ИНСТРУКЦИЯ.md)\nGOOGLE_CLIENT_ID=\n' >> "$ENV_FILE"
+grep -q '^CF_TUNNEL_TOKEN=' "$ENV_FILE" || printf '\n# Постоянный адрес через свой домен в Cloudflare (см. ИНСТРУКЦИЯ.md)\nCF_TUNNEL_TOKEN=\nPUBLIC_URL=\n' >> "$ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 
 # 5. Останавливаем прошлый запуск
@@ -78,16 +92,24 @@ kill -0 "$(cat "$RT/server.pid")" 2>/dev/null || { tail -n 20 "$LOGS/server.log"
 # 7. Туннель
 say "Открываю HTTPS-адрес"
 : > "$LOGS/tunnel.log"
-nohup "$RT/cloudflared" tunnel --no-autoupdate --protocol http2 --url "http://127.0.0.1:$PORT" >> "$LOGS/tunnel.log" 2>&1 &
-echo $! > "$RT/tunnel.pid"
-URL=""
-for _ in $(seq 1 45); do
-  URL="$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$LOGS/tunnel.log" | head -1)"
-  [ -n "$URL" ] && break
-  kill -0 "$(cat "$RT/tunnel.pid")" 2>/dev/null || break
-  sleep 1
-done
-[ -n "$URL" ] || { tail -n 20 "$LOGS/tunnel.log"; die "туннель не открылся (лог выше)"; }
+if [ -n "${CF_TUNNEL_TOKEN:-}" ]; then
+  # Постоянный туннель со своим доменом (настраивается в панели Cloudflare)
+  nohup "$RT/cloudflared" tunnel --no-autoupdate --protocol http2 run --token "$CF_TUNNEL_TOKEN" >> "$LOGS/tunnel.log" 2>&1 &
+  echo $! > "$RT/tunnel.pid"
+  URL="${PUBLIC_URL:-}"
+  [ -n "$URL" ] || URL="(адрес, который вы указали в Cloudflare)"
+else
+  nohup "$RT/cloudflared" tunnel --no-autoupdate --protocol http2 --url "http://127.0.0.1:$PORT" >> "$LOGS/tunnel.log" 2>&1 &
+  echo $! > "$RT/tunnel.pid"
+  URL=""
+  for _ in $(seq 1 45); do
+    URL="$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$LOGS/tunnel.log" | head -1)"
+    [ -n "$URL" ] && break
+    kill -0 "$(cat "$RT/tunnel.pid")" 2>/dev/null || break
+    sleep 1
+  done
+  [ -n "$URL" ] || { tail -n 20 "$LOGS/tunnel.log"; die "туннель не открылся (лог выше)"; }
+fi
 OK=""
 for _ in $(seq 1 40); do
   grep -q 'Registered tunnel connection' "$LOGS/tunnel.log" && { OK=1; break; }
@@ -100,7 +122,11 @@ echo "$URL" > "$DATA/url.txt"
 printf '\n\033[1;32m✔ Мессенджер работает!\033[0m\n\n'
 echo "  Адрес:            $URL"
 echo
-echo "  Адрес меняется при каждом перезапуске — после перезагрузки сервера"
-echo "  снова выполните:  bash $APP/run.sh"
+if [ -n "${GOOGLE_CLIENT_ID:-}" ]; then echo "  Вход через Google: включён"; else echo "  Вход через Google: выключен (нужен GOOGLE_CLIENT_ID в $ENV_FILE)"; fi
+if [ -z "${CF_TUNNEL_TOKEN:-}" ]; then
+  echo
+  echo "  Адрес временный и меняется при каждом перезапуске. После перезагрузки сервера"
+  echo "  снова выполните:  bash $APP/run.sh"
+fi
 echo "  Логи:  tail -f $LOGS/server.log"
 echo
