@@ -10,7 +10,7 @@ const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
 const { WebSocketServer } = require('ws');
-const Database = require('better-sqlite3');
+const { DatabaseSync } = require('node:sqlite');
 const bcrypt = require('bcryptjs');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -24,9 +24,13 @@ const SESSION_DAYS = 60;
 fs.mkdirSync(FILES_DIR, { recursive: true });
 
 /* ---------- База ---------- */
-const db = new Database(path.join(DATA_DIR, 'tiho.db'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+// Встроенная в Node.js база SQLite: ничего не нужно компилировать
+const db = new DatabaseSync(path.join(DATA_DIR, 'tiho.db'));
+db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+db.transaction = (fn) => () => {
+  db.exec('BEGIN');
+  try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; }
+};
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,

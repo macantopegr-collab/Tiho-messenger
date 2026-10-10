@@ -43,7 +43,7 @@ else
 fi
 
 say "Устанавливаю Node.js 22"
-if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 20 ]; then
+if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 22 ]; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   apt-get install -y nodejs
 fi
@@ -98,7 +98,7 @@ User=tiho
 Group=tiho
 EnvironmentFile=$ENV_FILE
 WorkingDirectory=$APP_DIR
-ExecStart=/usr/bin/node $APP_DIR/server.js
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning $APP_DIR/server.js
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

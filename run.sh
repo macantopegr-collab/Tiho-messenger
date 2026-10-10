@@ -71,7 +71,7 @@ sleep 1
 
 # 6. Мессенджер
 say "Запускаю мессенджер"
-PORT="$PORT" HOST=127.0.0.1 DATA_DIR="$DATA" nohup node "$APP/server.js" >> "$LOGS/server.log" 2>&1 &
+PORT="$PORT" HOST=127.0.0.1 DATA_DIR="$DATA" nohup node --disable-warning=ExperimentalWarning "$APP/server.js" >> "$LOGS/server.log" 2>&1 &
 echo $! > "$RT/server.pid"
 sleep 2
 kill -0 "$(cat "$RT/server.pid")" 2>/dev/null || { tail -n 20 "$LOGS/server.log"; die "мессенджер не запустился (лог выше)"; }
