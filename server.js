@@ -109,6 +109,12 @@ CREATE TABLE IF NOT EXISTS files (
   if (!ccols.has('pinned_id')) db.exec('ALTER TABLE chats ADD COLUMN pinned_id INTEGER');
   const mbcols = new Set(db.prepare('PRAGMA table_info(members)').all().map((c) => c.name));
   if (!mbcols.has('archived')) db.exec('ALTER TABLE members ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
+  if (!mbcols.has('muted_until')) db.exec('ALTER TABLE members ADD COLUMN muted_until INTEGER NOT NULL DEFAULT 0');
+  db.exec(`CREATE TABLE IF NOT EXISTS scheduled (
+    id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, body TEXT NOT NULL, mentions TEXT NOT NULL DEFAULT '[]',
+    send_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS idx_scheduled_at ON scheduled(send_at);`);
   if (!cols.has('folders')) db.exec("ALTER TABLE users ADD COLUMN folders TEXT NOT NULL DEFAULT '[]'");
   db.exec(`CREATE TABLE IF NOT EXISTS poll_votes (
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -176,7 +182,8 @@ const q = {
   chatMembers: db.prepare(`SELECT u.id, u.username, u.display_name, u.public_key, u.color, u.bio, u.avatar, u.last_seen, m.last_read_id
                            FROM members m JOIN users u ON u.id = m.user_id WHERE m.chat_id = ? ORDER BY u.id`),
   memberIds: db.prepare('SELECT user_id FROM members WHERE chat_id = ?'),
-  myChats: db.prepare(`SELECT c.*, m.last_read_id, m.archived,
+  myChats: db.prepare(`SELECT c.*, m.last_read_id, m.archived, m.muted_until,
+                         (SELECT COUNT(*) FROM scheduled sc WHERE sc.chat_id = c.id AND sc.sender_id = m.user_id) AS scheduled_count,
                          (SELECT MAX(id) FROM messages WHERE chat_id = c.id) AS last_id,
                          (SELECT COUNT(*) FROM messages WHERE chat_id = c.id AND id > m.last_read_id
                             AND (sender_id IS NULL OR sender_id != m.user_id)) AS unread,
@@ -328,6 +335,8 @@ function chatView(chat, userId) {
     members, lastMessage: last ? messageView(last) : null,
     pinned: chat.pinned_id ? (() => { const pm = q.messageById.get(chat.pinned_id); return pm && pm.kind !== 'deleted' ? messageView(pm) : null; })() : null,
     archived: !!chat.archived,
+    mutedUntil: chat.muted_until > now() ? chat.muted_until : 0,
+    scheduled: chat.scheduled_count || 0,
     groupCall: chat.type === 'group' ? roomView(rooms.get(chat.id)) : null,
     blocked: chat.type === 'direct' ? blockState(userId, members.find((m) => m.id !== userId)?.id) : null,
     unread: chat.unread ?? 0, mentions: chat.mentions ?? 0, lastReadId: chat.last_read_id ?? members.find((m) => m.id === userId)?.lastReadId ?? 0,
@@ -889,20 +898,92 @@ app.post('/api/chats/:id/messages', auth, json, (req, res) => {
     if (st === 'me') return fail(res, 403, 'Вы заблокировали этого пользователя');
     if (st === 'them') return fail(res, 403, 'Пользователь ограничил сообщения от вас');
   }
-  const info = q.insertMessage.run(chat.id, req.user.id, 'msg', JSON.stringify(env), now());
-  q.setRead.run(info.lastInsertRowid, chat.id, req.user.id);
+  const sendAt = Number(req.body.sendAt) || 0;
+  if (sendAt > now() + 5000) {
+    if (sendAt > now() + 366 * 86400000) return fail(res, 400, 'Можно запланировать не больше чем на год вперёд');
+    if (db.prepare('SELECT COUNT(*) AS n FROM scheduled WHERE sender_id = ?').get(req.user.id).n >= 100) return fail(res, 400, 'Слишком много отложенных сообщений');
+    const id = db.prepare('INSERT INTO scheduled (chat_id, sender_id, body, mentions, send_at, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(chat.id, req.user.id, JSON.stringify(env), JSON.stringify(Array.isArray(req.body.mentions) ? req.body.mentions.slice(0, 50) : []), sendAt, now()).lastInsertRowid;
+    sendTo(req.user.id, { type: 'scheduled', chatId: chat.id });
+    return res.json({ scheduled: { id, sendAt } });
+  }
+  res.json({ message: deliverMessage(chat.id, req.user.id, env, req.body.mentions, req.body.clientId) });
+});
+/* Доставка сообщения: сохранить, разослать, отметить упоминания, отправить push */
+function deliverMessage(chatId, senderId, env, mentions, clientId) {
+  const info = q.insertMessage.run(chatId, senderId, 'msg', JSON.stringify(env), now());
+  q.setRead.run(info.lastInsertRowid, chatId, senderId);
   /* Упоминания: текст зашифрован, поэтому клиент сам сообщает, кого отметил (только участников чата) */
   const mentioned = new Set();
-  if (Array.isArray(req.body.mentions)) {
-    for (const id of req.body.mentions.slice(0, 50).map(Number)) {
-      if (Number.isInteger(id) && id !== req.user.id && q.isMember.get(chat.id, id)) mentioned.add(id);
+  if (Array.isArray(mentions)) {
+    for (const id of mentions.slice(0, 50).map(Number)) {
+      if (Number.isInteger(id) && id !== senderId && q.isMember.get(chatId, id)) mentioned.add(id);
     }
-    for (const id of mentioned) db.prepare('INSERT OR IGNORE INTO mentions (message_id, chat_id, user_id) VALUES (?, ?, ?)').run(info.lastInsertRowid, chat.id, id);
+    for (const id of mentioned) db.prepare('INSERT OR IGNORE INTO mentions (message_id, chat_id, user_id) VALUES (?, ?, ?)').run(info.lastInsertRowid, chatId, id);
   }
   const msg = messageView(q.messageById.get(info.lastInsertRowid));
-  for (const { user_id } of q.memberIds.all(chat.id)) sendTo(user_id, { type: 'message', message: msg, clientId: req.body.clientId, mentioned: mentioned.has(user_id) || undefined });
-  pushMessage(chat.id, req.user.id, 'Новое сообщение', mentioned);
+  for (const { user_id } of q.memberIds.all(chatId)) sendTo(user_id, { type: 'message', message: msg, clientId, mentioned: mentioned.has(user_id) || undefined });
+  pushMessage(chatId, senderId, 'Новое сообщение', mentioned);
+  return msg;
+}
+
+/* Отложенные сообщения: зашифрованы заранее, сервер только ждёт нужного времени */
+function sendScheduled(row) {
+  db.prepare('DELETE FROM scheduled WHERE id = ?').run(row.id);
+  const chat = q.chatById.get(row.chat_id);
+  if (!chat || !q.isMember.get(chat.id, row.sender_id)) return null;
+  if (chat.type === 'direct') {
+    const otherId = q.memberIds.all(chat.id).map((r) => r.user_id).find((id) => id !== row.sender_id);
+    if (blockState(row.sender_id, otherId)) { sendTo(row.sender_id, { type: 'scheduled', chatId: chat.id }); return null; }
+  }
+  const msg = deliverMessage(chat.id, row.sender_id, JSON.parse(row.body), JSON.parse(row.mentions || '[]'));
+  sendTo(row.sender_id, { type: 'scheduled', chatId: chat.id });
+  broadcastChat(chat.id);
+  return msg;
+}
+setInterval(() => {
+  for (const row of db.prepare('SELECT * FROM scheduled WHERE send_at <= ? ORDER BY send_at LIMIT 50').all(now())) {
+    try { sendScheduled(row); } catch (e) { console.warn('scheduled send failed', e.message); }
+  }
+}, 5000).unref();
+app.get('/api/chats/:id/scheduled', auth, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  res.json({ scheduled: db.prepare('SELECT * FROM scheduled WHERE chat_id = ? AND sender_id = ? ORDER BY send_at').all(chat.id, req.user.id)
+    .map((r) => ({ id: r.id, chatId: r.chat_id, senderId: r.sender_id, body: JSON.parse(r.body), sendAt: r.send_at, createdAt: r.created_at })) });
+});
+function ownScheduled(req, res) {
+  const r = db.prepare('SELECT * FROM scheduled WHERE id = ? AND sender_id = ?').get(Number(req.params.id), req.user.id);
+  if (!r) fail(res, 404, 'Сообщение уже отправлено или удалено');
+  return r;
+}
+app.delete('/api/scheduled/:id', auth, (req, res) => {
+  const r = ownScheduled(req, res); if (!r) return;
+  db.prepare('DELETE FROM scheduled WHERE id = ?').run(r.id);
+  sendTo(req.user.id, { type: 'scheduled', chatId: r.chat_id });
+  broadcastChat(r.chat_id);
+  res.json({ ok: true });
+});
+app.post('/api/scheduled/:id/send', auth, (req, res) => {
+  const r = ownScheduled(req, res); if (!r) return;
+  const msg = sendScheduled(r);
+  if (!msg) return fail(res, 403, 'Не удалось отправить');
   res.json({ message: msg });
+});
+app.patch('/api/scheduled/:id', auth, json, (req, res) => {
+  const r = ownScheduled(req, res); if (!r) return;
+  const t = Number(req.body?.sendAt);
+  if (!t || t < now() || t > now() + 366 * 86400000) return fail(res, 400, 'Неверное время');
+  db.prepare('UPDATE scheduled SET send_at = ? WHERE id = ?').run(t, r.id);
+  sendTo(req.user.id, { type: 'scheduled', chatId: r.chat_id });
+  res.json({ ok: true });
+});
+
+/* Беззвучный режим чата — личная настройка */
+app.post('/api/chats/:id/mute', auth, json, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  const until = Math.max(0, Math.min(Number(req.body?.until) || 0, 4102444800000));
+  db.prepare('UPDATE members SET muted_until = ? WHERE chat_id = ? AND user_id = ?').run(until, chat.id, req.user.id);
+  res.json({ chat: fullChat(chat.id, req.user.id) });
 });
 
 /* Правка, удаление и реакции */
@@ -1362,6 +1443,8 @@ function pushMessage(chatId, senderId, kindText, mentioned) {
   if (!chat || !sender) return;
   for (const { user_id } of q.memberIds.all(chatId)) {
     if (user_id === senderId) continue;
+    const muted = db.prepare('SELECT muted_until FROM members WHERE chat_id = ? AND user_id = ?').get(chatId, user_id)?.muted_until > now();
+    if (muted && !mentioned?.has(user_id)) continue;
     const text = mentioned?.has(user_id) ? 'Упомянул(а) вас' : kindText;
     pushTo(user_id, {
       title: chat.type === 'group' ? chat.title : sender.display_name,

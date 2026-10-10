@@ -877,3 +877,24 @@ mark{background:#FFD34D;color:#141413;border-radius:3px;padding:0 1px}
 .composer>*{flex-shrink:0}
 .composer>.field{flex-shrink:1}
 @media (max-width:420px){.composer{gap:2px;padding:8px 6px}.composer .round-btn{width:38px}}
+
+/* ---------- v15: без звука, отложенные, оформление ---------- */
+.ci-mute{display:inline-flex;margin-left:-2px}
+.sched-bar{display:flex;align-items:center;gap:10px;width:100%;padding:9px 16px;border:0;border-bottom:1px solid var(--border);background:var(--surface);color:var(--accent);font:600 14px/1.2 inherit;cursor:pointer;text-align:left}
+.sched-bar .chev{color:var(--muted)}
+.sched-list{display:flex;flex-direction:column;gap:10px}
+.sched-item{padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.sched-when{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--accent)}
+.sched-text{font-size:14px;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:hidden}
+.accent-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.accent-sw{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:14px;border:2px solid var(--border);background:var(--surface);color:var(--text);font:500 14px/1 inherit;cursor:pointer}
+.accent-sw::before{content:"";width:20px;height:20px;border-radius:50%;background:var(--sw);flex:none}
+.accent-sw[aria-pressed=true]{border-color:var(--sw)}
+.wall-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.wall-tile{position:relative;aspect-ratio:3/4;border-radius:12px;border:2px solid var(--border);background:var(--chat-bg);background-size:cover;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:6px;padding:6px;cursor:pointer;color:var(--text-2);overflow:hidden}
+.wall-tile.wall-dots{background-image:radial-gradient(var(--wall-dot) 1.4px,transparent 1.4px);background-size:12px 12px}
+.wall-tile>svg{margin:auto 0 0}
+.wall-tile span{font-size:11px;background:var(--surface);padding:2px 6px;border-radius:8px;white-space:nowrap}
+.wall-tile[aria-pressed=true]{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.wall-tile.reset{justify-content:center}
+@media (max-width:420px){.wall-grid{grid-template-columns:repeat(3,1fr)}.accent-row{grid-template-columns:repeat(2,1fr)}}

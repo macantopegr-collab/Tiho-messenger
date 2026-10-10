@@ -89,6 +89,7 @@
     flip: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"/><path d="M9.5 13.5a2.5 2.5 0 0 0 4.6 1.3M14.5 12.5a2.5 2.5 0 0 0-4.6-1.3M14.5 15.5v-2h-2M9.5 10.5v2h2"/>',
     screen: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4M12 13V7m-3 3 3-3 3 3"/>',
     minimize: '<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/>',
+    bellOff: '<path d="M3 3l18 18M8.7 3.9A6 6 0 0 1 18 8c0 3.4.7 5.6 1.5 7M6 8c0 7-3 9-3 9h14M10 21h4"/>',
     flag: '<path d="M5 21V4h11l-1.5 4L16 12H5"/>',
     block: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
     devices: '<rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M6 18h6"/><rect x="17" y="8" width="5" height="12" rx="1.2"/>',
@@ -144,11 +145,69 @@
     get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* приватный режим */ } },
   };
+  /* Цвет оформления: [светлая тема, тёмная тема] */
+  const ACCENTS = {
+    green: { name: 'Мята', sw: '#2FD98C' },
+    blue: { name: 'Синий', sw: '#5B7BFF',
+      l: { accent: '#2747E0', 'accent-strong': '#1A2FA8', 'accent-soft': '#E4EAFF', 'on-accent': '#FFFFFF', 'on-accent-2': '#DCE3FF', 'out-bg': '#DCE5FF', 'out-quote': '#C6D4FF', 'quote-out': '#C6D4FF', 'out-meta': '#4A5A8C', 'out-check': '#2747E0', 'out-wave': '#9DB0EE', 'banner-bg': '#E8EDFF', 'banner-fg': '#24357A', active: '#E2E8FF', 'logo-fg': '#7D96FF' },
+      d: { accent: '#6F8DFF', 'accent-strong': '#9DB2FF', 'accent-soft': '#18224A', 'on-accent': '#050A1F', 'on-accent-2': '#18224A', 'out-bg': '#22336E', 'out-quote': '#2F4489', 'quote-out': '#2F4489', 'out-meta': '#AAB9EA', 'out-check': '#93AAFF', 'out-wave': '#5A72B8', 'banner-bg': '#121A38', 'banner-fg': '#A9BAFF', active: '#18224A', 'logo-fg': '#7D96FF' } },
+    violet: { name: 'Фиалка', sw: '#A47BFF',
+      l: { accent: '#6B3FD8', 'accent-strong': '#5228B5', 'accent-soft': '#EEE6FF', 'on-accent': '#FFFFFF', 'on-accent-2': '#E7DCFF', 'out-bg': '#E9DFFF', 'out-quote': '#D8C8FF', 'quote-out': '#D8C8FF', 'out-meta': '#5F4E8C', 'out-check': '#6B3FD8', 'out-wave': '#B7A2EC', 'banner-bg': '#F1EBFF', 'banner-fg': '#45287F', active: '#EDE5FF', 'logo-fg': '#B08CFF' },
+      d: { accent: '#A47BFF', 'accent-strong': '#C3A6FF', 'accent-soft': '#251A45', 'on-accent': '#12062A', 'on-accent-2': '#251A45', 'out-bg': '#3A2A6B', 'out-quote': '#4A3784', 'quote-out': '#4A3784', 'out-meta': '#C2B2EC', 'out-check': '#B99BFF', 'out-wave': '#7560B0', 'banner-bg': '#1C1435', 'banner-fg': '#C9B5FF', active: '#251A45', 'logo-fg': '#B08CFF' } },
+    orange: { name: 'Закат', sw: '#FF9A4D',
+      l: { accent: '#C2560F', 'accent-strong': '#9A420A', 'accent-soft': '#FFEBDD', 'on-accent': '#FFFFFF', 'on-accent-2': '#FFE3CF', 'out-bg': '#FFE6D3', 'out-quote': '#FFD3B3', 'quote-out': '#FFD3B3', 'out-meta': '#8A5A3A', 'out-check': '#C2560F', 'out-wave': '#E9AE85', 'banner-bg': '#FFF0E5', 'banner-fg': '#7A3609', active: '#FFEADB', 'logo-fg': '#FF9A4D' },
+      d: { accent: '#FF9A4D', 'accent-strong': '#FFB87F', 'accent-soft': '#3A2312', 'on-accent': '#1F0D02', 'on-accent-2': '#3A2312', 'out-bg': '#5A3418', 'out-quote': '#704220', 'quote-out': '#704220', 'out-meta': '#E9C1A2', 'out-check': '#FFAE70', 'out-wave': '#A56C43', 'banner-bg': '#2A1A0E', 'banner-fg': '#FFC59A', active: '#3A2312', 'logo-fg': '#FF9A4D' } },
+    pink: { name: 'Роза', sw: '#FF6FA8',
+      l: { accent: '#C2306D', 'accent-strong': '#9A1F53', 'accent-soft': '#FFE4EF', 'on-accent': '#FFFFFF', 'on-accent-2': '#FFDCEA', 'out-bg': '#FFDDEA', 'out-quote': '#FFC6DC', 'quote-out': '#FFC6DC', 'out-meta': '#8C4A66', 'out-check': '#C2306D', 'out-wave': '#E9A0BF', 'banner-bg': '#FFEDF4', 'banner-fg': '#7A1A43', active: '#FFE4EF', 'logo-fg': '#FF6FA8' },
+      d: { accent: '#FF6FA8', 'accent-strong': '#FF9DC4', 'accent-soft': '#3A1626', 'on-accent': '#21040F', 'on-accent-2': '#3A1626', 'out-bg': '#5E2240', 'out-quote': '#762C51', 'quote-out': '#762C51', 'out-meta': '#EBB3CB', 'out-check': '#FF8DBB', 'out-wave': '#A9577C', 'banner-bg': '#2A101C', 'banner-fg': '#FFADCF', active: '#3A1626', 'logo-fg': '#FF6FA8' } },
+    teal: { name: 'Море', sw: '#33C9E0',
+      l: { accent: '#0B7A8C', 'accent-strong': '#075E6C', 'accent-soft': '#DDF4F7', 'on-accent': '#FFFFFF', 'on-accent-2': '#D5F1F5', 'out-bg': '#D5F2F6', 'out-quote': '#BCE7EE', 'quote-out': '#BCE7EE', 'out-meta': '#46717A', 'out-check': '#0B7A8C', 'out-wave': '#91CBD5', 'banner-bg': '#E5F6F8', 'banner-fg': '#0D4A55', active: '#DDF4F7', 'logo-fg': '#33C9E0' },
+      d: { accent: '#33C9E0', 'accent-strong': '#6EDAEA', 'accent-soft': '#0F2E34', 'on-accent': '#021417', 'on-accent-2': '#0F2E34', 'out-bg': '#144852', 'out-quote': '#1D5A66', 'quote-out': '#1D5A66', 'out-meta': '#9FCFD8', 'out-check': '#5AD7EA', 'out-wave': '#4A8A96', 'banner-bg': '#0E2328', 'banner-fg': '#8FDDEA', active: '#0F2E34', 'logo-fg': '#33C9E0' } },
+  };
+  const ACCENT_KEYS = Object.keys(ACCENTS.blue.l);
+  /* Обои: [светлая, тёмная]; 'dots' — фирменные точки */
+  const WALLS = {
+    dots: { name: 'Точки' },
+    plain: { name: 'Без узора', css: ['none', 'none'] },
+    meadow: { name: 'Луг', css: ['linear-gradient(160deg,#E3F6EA,#F6F1DA)', 'linear-gradient(160deg,#0B1F16,#1A1B0E)'] },
+    sky: { name: 'Небо', css: ['linear-gradient(160deg,#DDEBFF,#F1E6FF)', 'linear-gradient(160deg,#0B1530,#1A1030)'] },
+    dawn: { name: 'Рассвет', css: ['linear-gradient(160deg,#FFE7D6,#FFE0EC)', 'linear-gradient(160deg,#2A160C,#2A0E1A)'] },
+    sea: { name: 'Море', css: ['linear-gradient(160deg,#D8F3F2,#DCE9FA)', 'linear-gradient(160deg,#08201F,#0B1628)'] },
+    night: { name: 'Ночь', css: ['radial-gradient(circle at 20% 10%,#E9EEF7,#D5DCEA)', 'radial-gradient(circle at 20% 10%,#18203A,#05070D)'] },
+    photo: { name: 'Своё фото' },
+  };
+  const darkNow = () => document.documentElement.dataset.theme === 'dark' ||
+    (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+  function applyAccent() {
+    const a = ACCENTS[store.get('tiho-accent', 'green')] || ACCENTS.green;
+    const st = document.documentElement.style;
+    for (const k of ACCENT_KEYS) st.removeProperty('--' + k);
+    if (a.l) for (const [k, v] of Object.entries(darkNow() ? a.d : a.l)) st.setProperty('--' + k, v);
+    applyWallpaper();
+  }
+  function wallFor(chatId) {
+    const per = chatId != null ? store.get('tiho-wall-chat', {})[chatId] : null;
+    return per || store.get('tiho-wall', 'dots');
+  }
+  function applyWallpaper(el = S.refs?.msgs, chatId = S.active) {
+    if (!el) return;
+    const w = wallFor(chatId);
+    el.classList.toggle('wall-dots', w === 'dots');
+    if (w === 'photo') {
+      const img = (chatId != null && store.get('tiho-wall-photo-' + chatId, '')) || store.get('tiho-wall-photo', '');
+      el.style.backgroundImage = img ? `linear-gradient(${darkNow() ? 'rgba(0,0,0,.45),rgba(0,0,0,.45)' : 'rgba(255,255,255,.15),rgba(255,255,255,.15)'}),url("${img}")` : '';
+      el.style.backgroundSize = 'cover'; el.style.backgroundPosition = 'center'; el.style.backgroundAttachment = 'local';
+    } else if (WALLS[w]?.css) {
+      el.style.backgroundImage = WALLS[w].css[darkNow() ? 1 : 0]; el.style.backgroundSize = 'cover'; el.style.backgroundAttachment = 'fixed'; el.style.backgroundPosition = '';
+    } else { el.style.backgroundImage = ''; el.style.backgroundSize = ''; el.style.backgroundAttachment = ''; el.style.backgroundPosition = ''; }
+  }
+  matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => applyAccent());
   function applyTheme() {
     document.documentElement.dataset.size = store.get('tiho-size', 'm');
     const t = store.get('tiho-theme', 'auto');
     if (t === 'auto') document.documentElement.removeAttribute('data-theme');
     else document.documentElement.setAttribute('data-theme', t);
+    applyAccent();
   }
 
   /* ---------- состояние ---------- */
@@ -911,13 +970,14 @@
         h('div', { class: 'ci-row' },
           c.type === 'group' ? h('span', { class: 'muted', title: 'Группа' }, icon('group', 15)) : null,
           h('span', { class: 'ci-name' }, chatTitle(c)),
+          isMuted(c) ? h('span', { class: 'muted ci-mute', title: 'Без звука', 'aria-label': 'Без звука' }, icon('bellOff', 14, 2)) : null,
           h('span', { class: 'ci-time' + (c.unread ? ' hot' : '') }, shortTime(lastTs(c)))),
         h('div', { class: 'ci-row' },
           ty ? h('span', { class: 'ci-prev typing' }, dots(), ty)
             : draft ? h('span', { class: 'ci-prev' }, h('span', { class: 'draft' }, 'Черновик: '), draft)
               : h('span', { class: 'ci-prev' }, prev),
           c.mentions ? h('span', { class: 'badge at-badge', 'aria-label': 'Вас упомянули', title: 'Вас упомянули' }, '@') : null,
-          c.unread ? h('span', { class: 'badge', 'aria-label': `${c.unread} непрочитанных` }, c.unread > 99 ? '99+' : c.unread) : null)));
+          c.unread ? h('span', { class: 'badge' + (isMuted(c) ? ' muted-badge' : ''), 'aria-label': `${c.unread} непрочитанных` }, c.unread > 99 ? '99+' : c.unread) : null)));
       longPress(item, (x, y) => chatMenu(c, x, y));
       list.append(h('li', null, item));
     }
@@ -957,7 +1017,7 @@
   }
 
   function updateTitle() {
-    const n = [...S.chats.values()].reduce((s, c) => s + (c.unread || 0), 0) + [...S.channels.values()].reduce((s, c) => s + (c.subscribed ? c.unread || 0 : 0), 0);
+    const n = [...S.chats.values()].reduce((s, c) => s + (isMuted(c) && !c.mentions ? 0 : c.unread || 0), 0) + [...S.channels.values()].reduce((s, c) => s + (c.subscribed ? c.unread || 0 : 0), 0);
     document.title = n ? `(${n}) Тихо` : 'Тихо';
     const tb = S.refs.tabbar?.querySelector('.tab-badge');
     if (tb) { tb.textContent = n > 99 ? '99+' : n; tb.style.display = n ? '' : 'none'; }
@@ -1137,6 +1197,7 @@
     S.searchQ = ''; S.searchOpen = false;
     pane.style.position = 'relative';
     setupDrop(pane);
+    applyWallpaper(msgs, chat.id);
     renderHead();
     renderPinned();
     renderMessages('bottom');
@@ -1229,7 +1290,11 @@
         h('span', { class: 'muted' }, String(count)), h('span', { class: 'chev' }, icon('chevron', 18)));
       const searchRow = !isGroup && chat ? h('button', { class: 'card-row', onclick: () => { closePage(); if (S.active !== chat.id) openChat(chat.id); setTimeout(openSearch, 50); } },
         h('span', { class: 'ic' }, icon('search', 19, 1.9)), h('span', { class: 'grow' }, h('b', null, 'Поиск по сообщениям')), h('span', { class: 'chev' }, icon('chevron', 18))) : null;
-      clear(listCard).append(...[searchRow,
+      const muteRow = chat && !isSaved(chat) ? h('button', { class: 'card-row', onclick: () => (isMuted(chat) ? setMuted(chat, 0) : muteMenu(chat)) },
+        h('span', { class: 'ic' }, icon(isMuted(chat) ? 'bellOff' : 'bell', 19, 1.9)), h('span', { class: 'grow' }, h('b', null, 'Уведомления'),
+          h('small', null, isMuted(chat) ? (chat.mutedUntil > Date.now() + 10 * 365 * 86400000 ? 'Выключены' : 'Без звука до ' + new Date(chat.mutedUntil).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })) : 'Включены')),
+        h('span', { class: 'chev' }, icon('chevron', 18))) : null;
+      clear(listCard).append(...[muteRow, searchRow,
         row('image', 'Медиа', st.images.length, () => modal('Медиа', [h('div', { class: 'media-grid' }, st.images.map((p) => thumb(p, 104)))])),
         st.images.length ? h('div', { class: 'media-strip' }, st.images.slice(0, 4).map((p) => thumb(p, 72))) : null,
         row('files', 'Файлы', st.files.length, () => modal('Файлы', [h('div', { class: 'file-list' }, st.files.map((p) => fileEl(p)))])),
@@ -1742,7 +1807,29 @@
     let lastTyping = 0;
     const canVoice = !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
     const autosize = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px'; };
-    const actionBtn = h('button', { class: 'send', onclick: () => (input.value.trim() || !canVoice ? submit() : startVoice()) });
+    let heldSend = false;
+    const actionBtn = h('button', { class: 'send', onclick: () => { if (heldSend) { heldSend = false; return; } (input.value.trim() || !canVoice ? submit() : startVoice()); } });
+    const laterMenu = (x, y) => {
+      if (!input.value.trim() || S.edit) return;
+      openMenu(x, y - 60, [['clock', 'Отправить позже', () => scheduleDialog()]]);
+    };
+    actionBtn.addEventListener('contextmenu', (e) => { e.preventDefault(); laterMenu(e.clientX - 160, e.clientY); });
+    let sendT;
+    actionBtn.addEventListener('touchstart', (e) => {
+      if (!input.value.trim()) return;
+      const t = e.touches[0];
+      sendT = setTimeout(() => { heldSend = true; navigator.vibrate?.(12); laterMenu(t.clientX - 180, t.clientY); }, 450);
+    }, { passive: true });
+    ['touchend', 'touchmove', 'touchcancel'].forEach((ev) => actionBtn.addEventListener(ev, () => clearTimeout(sendT), { passive: true }));
+    const scheduleDialog = () => {
+      const text = input.value.trim();
+      if (!text) return;
+      pickTime(async (sendAt) => {
+        const link = takeLink(text);
+        input.value = ''; autosize(); setDraft(chat.id, ''); syncBtn();
+        await sendPayload(link ? { t: 'text', text, link } : { t: 'text', text }, chat.id, { sendAt });
+      });
+    };
     const syncBtn = () => {
       const has = !!input.value.trim();
       clear(actionBtn).append(has || !canVoice || S.edit ? icon(S.edit ? 'check' : 'send', 20, 2.2) : icon('mic', 22, 2));
@@ -2012,10 +2099,21 @@
   }
 
   let clientSeq = 0;
-  async function sendPayload(payload, chatId = S.active) {
+  async function sendPayload(payload, chatId = S.active, opts = {}) {
     const chat = S.chats.get(chatId);
     if (!chat) return;
     if (S.reply && chatId === S.active) { payload.reply = S.reply; setReply(null); }
+    if (opts.sendAt) {
+      try {
+        const envelope = await C.encryptMessage(payload, { chatId, senderId: S.me.id, senderPriv: S.priv,
+          recipients: chat.members.map((m) => ({ id: m.id, publicKey: m.id === S.me.id ? S.pub : m.publicKey })) });
+        await api(`/api/chats/${chatId}/messages`, { body: { envelope, sendAt: opts.sendAt, mentions: mentionIds(chat, payload) } });
+        chat.scheduled = (chat.scheduled || 0) + 1;
+        if (S.active === chatId) renderPinned();
+        toast('Будет отправлено ' + whenText(opts.sendAt));
+      } catch (e) { toast('Не запланировано: ' + e.message); }
+      return;
+    }
     const clientId = Date.now().toString(36) + '-' + (clientSeq++);
     const box = S.msgs.get(chatId) || { list: [], hasMore: false };
     S.msgs.set(chatId, box);
@@ -2098,7 +2196,7 @@
     if (mine) { chat.lastReadId = Math.max(chat.lastReadId || 0, msg.id); const me = memberOf(chat, S.me.id); if (me) me.lastReadId = chat.lastReadId; }
     else if (isNew && msg.kind === 'msg') {
       S.typing.get(chat.id)?.delete(msg.senderId);
-      if (!viewing) { chat.unread = (chat.unread || 0) + 1; if (mentioned) chat.mentions = (chat.mentions || 0) + 1; notify(chat, msg); }
+      if (!viewing) { chat.unread = (chat.unread || 0) + 1; if (mentioned) chat.mentions = (chat.mentions || 0) + 1; notify(chat, msg, mentioned); }
     }
     renderList();
     updateTitle();
@@ -2120,7 +2218,8 @@
       o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.26);
     } catch { /* без звука */ }
   }
-  function notify(chat, msg) {
+  function notify(chat, msg, mentioned) {
+    if (isMuted(chat) && !mentioned) return;
     if (store.get('tiho-sound', false)) beep();
     if (!store.get('tiho-notify', false) || !('Notification' in window) || Notification.permission !== 'granted' || !document.hidden) return;
     const showText = store.get('tiho-notify-text', false);
@@ -2176,6 +2275,11 @@
     if (d.type === 'loggedOut') { S.ws = null; toast('Сеанс завершён на другом устройстве'); setTimeout(() => location.reload(), 1200); return; }
     if (d.type === 'reports') { if (S.admin) { toast('Новая жалоба'); if (S.tab === 'profile') renderProfileTab(); } return; }
     if (d.type === 'blocks') return;
+    if (d.type === 'scheduled') {
+      const c = S.chats.get(d.chatId);
+      if (c) api(`/api/chats/${c.id}/scheduled`).then((r) => { c.scheduled = r.scheduled.length; if (S.active === c.id) renderPinned(); }).catch(() => {});
+      return;
+    }
     if (d.type === 'stories') return loadStories();
     if (d.type === 'storyViews') {
       if (d.reaction) toast(`${d.from} отреагировал(а) ${d.reaction} на вашу историю`);
@@ -2585,10 +2689,62 @@
           store.set('tiho-size', k); applyTheme();
           sizeSeg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.k === k)));
         } }, l)));
+    const accentNow = store.get('tiho-accent', 'green');
+    const accents = h('div', { class: 'accent-row', role: 'group', 'aria-label': 'Цвет' }, Object.entries(ACCENTS).map(([k, a]) => h('button', {
+      class: 'accent-sw', style: '--sw:' + a.sw, 'aria-label': a.name, title: a.name, 'aria-pressed': String(k === accentNow), onclick: (e) => {
+        store.set('tiho-accent', k); applyAccent();
+        accents.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === e.currentTarget)));
+      } }, h('span', null, a.name))));
     modal('Внешний вид', [
       h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Тема'), themeSeg),
+      h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Цвет'), accents),
+      h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Обои для всех чатов'), wallPicker(null)),
       h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Размер текста в чатах'), sizeSeg),
+      h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Обои для отдельного чата: нажмите и удерживайте чат в списке → «Обои чата». Оформление сохраняется на этом устройстве.'),
     ]);
+  }
+
+  /* Выбор обоев: chatId = null — для всех чатов */
+  function wallPicker(chatId) {
+    const cur = () => (chatId != null ? store.get('tiho-wall-chat', {})[chatId] || '' : store.get('tiho-wall', 'dots'));
+    const fileIn = h('input', { type: 'file', accept: 'image/*', class: 'sr', tabindex: '-1', 'aria-hidden': 'true' });
+    const set = (k) => {
+      if (chatId != null) { const m = store.get('tiho-wall-chat', {}); if (k) m[chatId] = k; else delete m[chatId]; store.set('tiho-wall-chat', m); }
+      else store.set('tiho-wall', k);
+      draw(); applyWallpaper();
+    };
+    fileIn.addEventListener('change', async () => {
+      const f = fileIn.files[0]; fileIn.value = '';
+      if (!f) return;
+      try {
+        const bmp = await createImageBitmap(f);
+        const k = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
+        const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+        c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); bmp.close?.();
+        const url = c.toDataURL('image/jpeg', 0.78);
+        store.set(chatId != null ? 'tiho-wall-photo-' + chatId : 'tiho-wall-photo', url);
+        if (store.get(chatId != null ? 'tiho-wall-photo-' + chatId : 'tiho-wall-photo', '') !== url) return toast('Фото слишком большое для памяти браузера');
+        set('photo');
+      } catch { toast('Не удалось открыть фото'); }
+    });
+    const grid = h('div', { class: 'wall-grid' });
+    const draw = () => {
+      const now = cur();
+      clear(grid);
+      if (chatId != null) grid.append(h('button', { class: 'wall-tile reset', 'aria-pressed': String(!now), onclick: () => set('') }, h('span', null, 'Как у всех')));
+      for (const [k, w] of Object.entries(WALLS)) {
+        const tile = h('button', { class: 'wall-tile' + (k === 'dots' ? ' wall-dots' : ''), 'aria-pressed': String(k === now), 'aria-label': w.name,
+          onclick: () => (k === 'photo' ? fileIn.click() : set(k)) }, h('span', null, w.name));
+        if (w.css) tile.style.backgroundImage = w.css[darkNow() ? 1 : 0];
+        if (k === 'photo') {
+          const img = chatId != null ? store.get('tiho-wall-photo-' + chatId, '') : store.get('tiho-wall-photo', '');
+          if (img) { tile.style.backgroundImage = `url("${img}")`; tile.style.backgroundSize = 'cover'; } else tile.prepend(icon('image', 22, 1.8));
+        }
+        grid.append(tile);
+      }
+    };
+    draw();
+    return h('div', null, grid, fileIn);
   }
 
   async function openStorage() {
@@ -3636,9 +3792,26 @@
       renderChips(); renderList(); toast(archived ? 'Чат в архиве' : 'Чат возвращён из архива');
     } catch (e) { toast(e.message); }
   }
+  const isMuted = (c) => !!c && c.mutedUntil > Date.now();
+  async function setMuted(c, until) {
+    try {
+      const { chat } = await api(`/api/chats/${c.id}/mute`, { body: { until } });
+      c.mutedUntil = chat.mutedUntil;
+      renderList(); updateTitle(); if (S.active === c.id) renderHead();
+      if (S.page) renderPane();
+      toast(until ? (until > Date.now() + 10 * 365 * 86400000 ? 'Уведомления выключены' : 'Без звука до ' + new Date(until).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })) : 'Уведомления включены');
+    } catch (e) { toast(e.message); }
+  }
+  function muteMenu(c) {
+    const H = 3600000;
+    const close = modal('Без звука', [h('div', { class: 'card' }, [['На 1 час', H], ['На 8 часов', 8 * H], ['На 1 день', 24 * H], ['На неделю', 7 * 24 * H], ['Навсегда', 0]].map(([l, d]) =>
+      h('button', { class: 'card-row', onclick: () => { close(); setMuted(c, d ? Date.now() + d : 4102444800000); } }, h('span', { class: 'ic' }, icon('bellOff', 18)), h('span', { class: 'grow' }, h('b', null, l)))))]);
+  }
   function chatMenu(c, x, y) {
     const folders = S.folders || [];
     openMenu(x, y, [
+      isMuted(c) ? ['bell', 'Включить звук', () => setMuted(c, 0)] : ['bellOff', 'Без звука…', () => muteMenu(c)],
+      ['image', 'Обои чата', () => modal('Обои: ' + chatTitle(c), [wallPicker(c.id)])],
       c.archived ? ['leave', 'Вернуть из архива', () => setArchived(c, false)] : ['database', 'В архив', () => setArchived(c, true)],
       ['plus', folders.length ? 'Добавить в папку…' : 'Создать папку с этим чатом', () => {
         if (!folders.length) return editFolder({ id: null, name: '', chatIds: [c.id] });
@@ -3660,6 +3833,10 @@
     const box = S.refs.pinBox;
     if (!box || !chat) return;
     clear(box);
+    if (chat.scheduled) {
+      box.append(h('button', { class: 'sched-bar', onclick: () => openScheduled(chat) }, icon('clock', 18),
+        h('span', { class: 'grow' }, `Отложенные сообщения: ${chat.scheduled}`), h('span', { class: 'chev' }, icon('chevron', 16))));
+    }
     const pm = chat.pinned;
     if (!pm) return;
     const p = plainOf(pm);
@@ -3732,6 +3909,53 @@
       if (i < n.length) out.push(n.slice(i));
     }
     return out;
+  }
+
+  /* ---------- Отложенные сообщения ---------- */
+  function whenText(ts) {
+    const d = new Date(ts);
+    const t = pad(d.getHours()) + ':' + pad(d.getMinutes());
+    if (sameDay(ts, Date.now())) return 'сегодня в ' + t;
+    if (sameDay(ts, Date.now() + 86400000)) return 'завтра в ' + t;
+    return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) + ' в ' + t;
+  }
+  function pickTime(onPick, initial) {
+    const at = (days, hh, mm = 0) => { const d = new Date(); d.setDate(d.getDate() + days); d.setHours(hh, mm, 0, 0); return d.getTime(); };
+    const presets = [['Через час', Date.now() + 3600000]];
+    if (at(0, 20) > Date.now() + 10 * 60000) presets.push(['Сегодня в 20:00', at(0, 20)]);
+    presets.push(['Завтра в 9:00', at(1, 9)], ['Завтра в 18:00', at(1, 18)]);
+    const local = (ts) => { const d = new Date(ts - new Date(ts).getTimezoneOffset() * 60000); return d.toISOString().slice(0, 16); };
+    const inp = h('input', { class: 'input', type: 'datetime-local', value: local(initial || Date.now() + 3600000), min: local(Date.now()) });
+    const go = (ts) => {
+      if (!ts || ts < Date.now() + 30000) { toast('Выберите время в будущем'); return; }
+      close(); onPick(ts);
+    };
+    const close = modal('Отправить позже', [
+      h('div', { class: 'card' }, presets.map(([l, ts]) => h('button', { class: 'card-row', onclick: () => go(ts) }, h('span', { class: 'ic' }, icon('clock', 18)),
+        h('span', { class: 'grow' }, h('b', null, l), h('small', null, whenText(ts)))))),
+      h('label', { class: 'field-label' }, 'Своё время', inp),
+      h('button', { class: 'btn block', onclick: () => go(new Date(inp.value).getTime()) }, 'Запланировать'),
+      h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Сообщение зашифровано сейчас и хранится на сервере до нужного времени. Сервер отправит его, даже если ваш телефон будет выключен.'),
+    ]);
+  }
+  async function openScheduled(chat) {
+    let list;
+    try { ({ scheduled: list } = await api(`/api/chats/${chat.id}/scheduled`)); } catch (e) { return toast(e.message); }
+    chat.scheduled = list.length; renderPinned();
+    if (!list.length) return;
+    const rows = await Promise.all(list.map(async (r) => {
+      let p;
+      try { p = cleanPayload(await C.decryptMessage(r.body, { chatId: chat.id, senderId: S.me.id, senderPublicKey: S.pub, myId: S.me.id, myPriv: S.priv })); } catch { p = { t: 'error' }; }
+      return { r, p };
+    }));
+    const act = async (fn) => { try { await fn(); close(); openScheduled(chat); } catch (e) { toast(e.message); } };
+    const close = modal('Отложенные сообщения', [h('div', { class: 'sched-list' }, rows.map(({ r, p }) => h('div', { class: 'card sched-item' },
+      h('div', { class: 'sched-when' }, icon('clock', 15), whenText(r.sendAt)),
+      h('div', { class: 'sched-text' }, previewOf(p)),
+      h('div', { class: 'report-actions' },
+        h('button', { class: 'btn', onclick: () => act(() => api(`/api/scheduled/${r.id}/send`, { method: 'POST' })) }, 'Отправить сейчас'),
+        h('button', { class: 'btn ghost', onclick: () => { close(); pickTime((ts) => act(() => api('/api/scheduled/' + r.id, { method: 'PATCH', body: { sendAt: ts } })), r.sendAt); } }, 'Изменить время'),
+        h('button', { class: 'btn ghost danger-text', 'aria-label': 'Удалить отложенное', onclick: () => act(() => api('/api/scheduled/' + r.id, { method: 'DELETE' })) }, icon('trash', 16), 'Удалить')))))]);
   }
 
   /* Пересылка: сообщение заново шифруется для участников другого чата */
