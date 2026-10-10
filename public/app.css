@@ -953,3 +953,12 @@ body.secret-shield .msgs,body.secret-shield .chat-list .ci-prev{filter:blur(16px
 .once-note{display:flex;align-items:center;gap:4px;font-size:12px;opacity:.8}
 .once-viewer img{user-select:none;-webkit-user-drag:none}
 .once-hint{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);color:#fff;background:rgba(0,0,0,.55);padding:6px 12px;border-radius:12px;font-size:13px}
+
+/* ---------- v19: Тихобот ---------- */
+.bot-av{background:linear-gradient(135deg,var(--accent),var(--accent-strong));color:var(--on-accent)}
+.bubble.bot-b{border:1px solid var(--accent-soft)}
+.bot-hero{display:flex;align-items:center;gap:12px}
+.bot-hero>div:last-child{display:flex;flex-direction:column;gap:3px}
+.bot-hero small{color:var(--muted);font-size:12px;line-height:1.4}
+.theme-seg.wrap{flex-wrap:wrap}
+.theme-seg.wrap button{flex:1 1 45%}

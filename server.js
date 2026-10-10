@@ -364,6 +364,7 @@ function chatView(chat, userId) {
     mutedUntil: chat.muted_until > now() ? chat.muted_until : 0,
     scheduled: chat.scheduled_count || 0,
     groupCall: chat.type === 'group' ? roomView(rooms.get(chat.id)) : null,
+    bot: chat.type === 'group' ? !!db.prepare('SELECT enabled FROM group_bots WHERE chat_id = ?').get(chat.id)?.enabled : false,
     secret: !!chat.secret, ttl: chat.ttl || 0,
     perms: chat.type === 'group' ? groupPerms(chat) : null,
     blocked: chat.type === 'direct' ? blockState(userId, members.find((m) => m.id !== userId)?.id) : null,
@@ -890,6 +891,7 @@ app.post('/api/chats/:id/members', auth, json, (req, res) => {
     }
     if (added.length) addSystem(chat.id, `${req.user.display_name} добавил(а): ${added.map((u) => u.display_name).join(', ')}`);
   })();
+  if (added.length) setTimeout(() => botWelcome(chat.id, added), 300);
   broadcastChat(chat.id);
   res.json({ chat: fullChat(chat.id, req.user.id) });
 });
@@ -1127,6 +1129,123 @@ app.post('/api/chats/:id/pin', auth, json, (req, res) => {
   res.json({ chat: fullChat(chat.id, req.user.id) });
 });
 
+/* ---------- Тихобот: встроенный бот для групп ----------
+ * Сообщения бота создаёт сервер, поэтому они не шифруются сквозным шифрованием (как системные). */
+db.exec(`CREATE TABLE IF NOT EXISTS group_bots (chat_id INTEGER PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 1, welcome TEXT NOT NULL DEFAULT '', rules TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS bot_tasks (id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL, body TEXT NOT NULL, next_at INTEGER NOT NULL, repeat TEXT NOT NULL DEFAULT 'once', tz INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_bot_tasks_next ON bot_tasks(next_at);`);
+const botCfg = (chatId) => db.prepare('SELECT * FROM group_bots WHERE chat_id = ?').get(chatId);
+function botPost(chatId, body) {
+  const info = q.insertMessage.run(chatId, null, 'bot', JSON.stringify(body), now());
+  const msg = messageView(q.messageById.get(info.lastInsertRowid));
+  for (const { user_id } of q.memberIds.all(chatId)) sendTo(user_id, { type: 'message', message: msg });
+  const chat = q.chatById.get(chatId);
+  for (const { user_id } of q.memberIds.all(chatId)) {
+    if (db.prepare('SELECT muted_until FROM members WHERE chat_id = ? AND user_id = ?').get(chatId, user_id)?.muted_until > now()) continue;
+    pushTo(user_id, { title: chat.title, body: '🤖 ' + (body.poll ? 'Опрос: ' + body.poll.question : body.text).slice(0, 120), tag: 'chat-' + chatId, url: '/', chatId });
+  }
+  return msg;
+}
+function botWelcome(chatId, users) {
+  const cfg = botCfg(chatId);
+  if (!cfg?.enabled || !cfg.welcome || !users.length) return;
+  const names = users.map((u) => u.display_name || u.displayName).join(', ');
+  botPost(chatId, { text: cfg.welcome.replaceAll('{имя}', names).replaceAll('{name}', names) });
+}
+const cleanText = (v, n) => String(v || '').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim().slice(0, n);
+function nextRun(t, repeat, tz) {
+  const DAY = 86400000;
+  if (repeat === 'daily') return t + DAY;
+  if (repeat === 'weekly') return t + 7 * DAY;
+  if (repeat === 'weekdays') {
+    let n = t + DAY;
+    // день недели в часовом поясе создателя
+    while ([0, 6].includes(new Date(n - tz * 60000).getUTCDay())) n += DAY;
+    return n;
+  }
+  return 0;
+}
+const taskView = (t) => ({ id: t.id, kind: t.kind, body: JSON.parse(t.body), nextAt: t.next_at, repeat: t.repeat });
+app.get('/api/chats/:id/bot', auth, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  if (chat.type !== 'group') return fail(res, 400, 'Бот есть только в группах');
+  const cfg = botCfg(chat.id) || { enabled: 0, welcome: '', rules: '' };
+  res.json({ enabled: !!cfg.enabled, welcome: cfg.welcome, rules: cfg.rules, admin: isGroupAdmin(chat.id, req.user.id),
+    tasks: isGroupAdmin(chat.id, req.user.id) ? db.prepare('SELECT * FROM bot_tasks WHERE chat_id = ? ORDER BY next_at').all(chat.id).map(taskView) : [] });
+});
+app.put('/api/chats/:id/bot', auth, json, (req, res) => {
+  const chat = requireGroupAdmin(req, res); if (!chat) return;
+  const was = botCfg(chat.id);
+  const enabled = req.body?.enabled ? 1 : 0;
+  db.prepare('INSERT INTO group_bots (chat_id, enabled, welcome, rules) VALUES (?, ?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET enabled = excluded.enabled, welcome = excluded.welcome, rules = excluded.rules')
+    .run(chat.id, enabled, cleanText(req.body?.welcome, 1000), cleanText(req.body?.rules, 3000));
+  if (enabled && !was?.enabled) botPost(chat.id, { text: 'Привет! Я Тихобот 🤖 Напишите /помощь, чтобы узнать, что я умею.' });
+  broadcastChat(chat.id);
+  res.json({ ok: true });
+});
+app.post('/api/chats/:id/bot/tasks', auth, json, (req, res) => {
+  const chat = requireGroupAdmin(req, res); if (!chat) return;
+  if (db.prepare('SELECT COUNT(*) AS n FROM bot_tasks WHERE chat_id = ?').get(chat.id).n >= 30) return fail(res, 400, 'Не больше 30 заданий');
+  const kind = req.body?.kind === 'poll' ? 'poll' : 'text';
+  const repeat = ['once', 'daily', 'weekdays', 'weekly'].includes(req.body?.repeat) ? req.body.repeat : 'once';
+  const at = Number(req.body?.firstAt);
+  if (!at || at < now() - 60000 || at > now() + 366 * 86400000) return fail(res, 400, 'Укажите время в будущем');
+  let body;
+  if (kind === 'poll') {
+    const options = Array.isArray(req.body?.options) ? req.body.options.map((o) => cleanText(o, 100)).filter(Boolean).slice(0, 10) : [];
+    const question = cleanText(req.body?.question, 200);
+    if (!question || options.length < 2) return fail(res, 400, 'Нужен вопрос и минимум 2 варианта');
+    body = { poll: { question, options, multiple: !!req.body?.multiple } };
+  } else {
+    const text = cleanText(req.body?.text, 2000);
+    if (!text) return fail(res, 400, 'Напишите текст напоминания');
+    body = { text };
+  }
+  db.prepare('INSERT INTO bot_tasks (chat_id, kind, body, next_at, repeat, tz, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(chat.id, kind, JSON.stringify(body), at, repeat, Number(req.body?.tz) || 0, req.user.id, now());
+  if (!botCfg(chat.id)) db.prepare('INSERT INTO group_bots (chat_id, enabled) VALUES (?, 1)').run(chat.id);
+  res.json({ ok: true });
+});
+app.delete('/api/bot-tasks/:id', auth, (req, res) => {
+  const t = db.prepare('SELECT * FROM bot_tasks WHERE id = ?').get(Number(req.params.id));
+  if (!t || !isGroupAdmin(t.chat_id, req.user.id)) return fail(res, 404, 'Задание не найдено');
+  db.prepare('DELETE FROM bot_tasks WHERE id = ?').run(t.id);
+  res.json({ ok: true });
+});
+setInterval(() => {
+  for (const t of db.prepare('SELECT * FROM bot_tasks WHERE next_at <= ? LIMIT 50').all(now())) {
+    try {
+      if (botCfg(t.chat_id)?.enabled && q.chatById.get(t.chat_id)) botPost(t.chat_id, JSON.parse(t.body));
+      const next = nextRun(t.next_at, t.repeat, t.tz);
+      if (next) db.prepare('UPDATE bot_tasks SET next_at = ? WHERE id = ?').run(next < now() ? nextRun(now(), t.repeat, t.tz) : next, t.id);
+      else db.prepare('DELETE FROM bot_tasks WHERE id = ?').run(t.id);
+    } catch (e) { console.warn('bot task failed', e.message); }
+  }
+}, 5000).unref();
+/* Команды: клиент видит свой текст и сам вызывает команду (сервер переписку не читает) */
+app.post('/api/chats/:id/bot/command', auth, json, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  const cfg = botCfg(chat.id);
+  if (!cfg?.enabled) return fail(res, 400, 'Бот в этой группе выключен');
+  if (rateLimited('botcmd:' + chat.id, 30, 60000)) return fail(res, 429, 'Слишком часто');
+  const cmd = String(req.body?.cmd || '').toLowerCase().replace(/^\//, '').replace(/@.*$/, '');
+  const name = req.user.display_name;
+  let text;
+  if (['правила', 'rules'].includes(cmd)) text = cfg.rules ? '📋 Правила группы:\n' + cfg.rules : 'Правила пока не написаны. Админ может добавить их в настройках бота.';
+  else if (['монетка', 'coin'].includes(cmd)) text = `🪙 ${name} подбрасывает монетку: ${crypto.randomInt(2) ? 'орёл' : 'решка'}!`;
+  else if (['кубик', 'dice'].includes(cmd)) text = `🎲 ${name} бросает кубик: ${crypto.randomInt(1, 7)}`;
+  else if (['кто', 'online'].includes(cmd)) {
+    const on = q.chatMembers.all(chat.id).filter((m) => online.has(m.id)).map((m) => m.display_name);
+    text = on.length ? `🟢 Сейчас в сети (${on.length}): ${on.join(', ')}` : 'Сейчас никого нет в сети';
+  } else if (['помощь', 'help', 'start'].includes(cmd)) text = 'Я умею:\n/правила — правила группы\n/кто — кто сейчас в сети\n/монетка — орёл или решка\n/кубик — бросить кубик\nАдмины могут настроить приветствие, напоминания и опросы по расписанию.';
+  else return res.json({ ok: false });
+  botPost(chat.id, { text });
+  res.json({ ok: true });
+});
+
 /* ---------- Секретные чаты ---------- */
 function removeMessagesHard(chatId, ids) {
   if (!ids.length) return;
@@ -1313,6 +1432,7 @@ app.post('/api/invites/:code/join', auth, (req, res) => {
     db.prepare('UPDATE invites SET uses = uses + 1 WHERE code = ?').run(r.code);
     addSystem(chat.id, `${req.user.display_name} вступил(а) по ссылке`);
   })();
+  setTimeout(() => botWelcome(chat.id, [req.user]), 300);
   broadcastChat(chat.id);
   res.json({ chat: fullChat(chat.id, req.user.id) });
 });
@@ -1340,7 +1460,7 @@ app.put('/api/me/folders', auth, json, (req, res) => {
 /* Голосование в опросе (вопрос и варианты зашифрованы, сервер знает только номера вариантов) */
 app.post('/api/messages/:id/vote', auth, json, (req, res) => {
   const m = q.messageById.get(Number(req.params.id));
-  if (!m || m.kind !== 'msg' || !q.isMember.get(m.chat_id, req.user.id)) return fail(res, 404, 'Опрос не найден');
+  if (!m || !['msg', 'bot'].includes(m.kind) || !q.isMember.get(m.chat_id, req.user.id)) return fail(res, 404, 'Опрос не найден');
   const opts = Array.isArray(req.body?.options) ? [...new Set(req.body.options.map(Number))].filter((n) => Number.isInteger(n) && n >= 0 && n < 12) : [];
   db.transaction(() => {
     db.prepare('DELETE FROM poll_votes WHERE message_id = ? AND user_id = ?').run(m.id, req.user.id);

@@ -90,6 +90,7 @@
     screen: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4M12 13V7m-3 3 3-3 3 3"/>',
     minimize: '<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/>',
     bellOff: '<path d="M3 3l18 18M8.7 3.9A6 6 0 0 1 18 8c0 3.4.7 5.6 1.5 7M6 8c0 7-3 9-3 9h14M10 21h4"/>',
+    bot: '<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01M9.5 16.5h5M2 13v3M22 13v3"/><circle cx="12" cy="3.5" r="1"/>',
     flag: '<path d="M5 21V4h11l-1.5 4L16 12H5"/>',
     block: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
     devices: '<rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M6 18h6"/><rect x="17" y="8" width="5" height="12" rx="1.2"/>',
@@ -270,6 +271,9 @@
   const allowed = (chat, what) => !chat || chat.type !== 'group' || (chat.perms?.[what] || 'all') !== 'admins' || isAdminOf(chat);
   const ROLE_NAME = { owner: 'владелец', admin: 'админ' };
   const isSecret = (chat) => !!chat?.secret;
+  const BOT_USER = { id: 0, displayName: 'Тихобот', color: 2 };
+  const botAvatar = (size) => h('div', { class: 'av bot-av', style: `width:${size}px;height:${size}px` }, icon('bot', Math.round(size * .58), 1.9));
+  const BOT_CMDS = [['помощь', 'что умеет бот'], ['правила', 'правила группы'], ['кто', 'кто сейчас в сети'], ['монетка', 'орёл или решка'], ['кубик', 'бросить кубик']];
   const isSaved = (chat) => !!chat && chat.type === 'direct' && chat.members.length === 1 && chat.members[0].id === S.me.id;
   const chatTitle = (chat) => chat.type === 'group' ? chat.title : isSaved(chat) ? 'Избранное' : (other(chat)?.displayName || 'Чат');
   function avatar(chat, size = 52) {
@@ -335,6 +339,7 @@
     if (msg.kind === 'deleted') return { t: 'deleted' };
     if (msg.kind === 'gift') return { t: 'gift', ...msg.body };
     if (msg.kind === 'call') return { t: 'call', ...msg.body };
+    if (msg.kind === 'bot') return botPlain(msg);
     if (msg.payload) return msg.payload;
     if (S.plain.has(msg.id)) return S.plain.get(msg.id);
     let p;
@@ -349,13 +354,16 @@
     S.plain.set(msg.id, p);
     return p;
   }
-  const plainOf = (msg) => msg.kind === 'call' ? { t: 'call', ...msg.body } : msg.kind === 'gift' ? { t: 'gift', ...msg.body } : msg.kind === 'deleted' ? { t: 'deleted' } : (S.plain.get(msg.id) || msg.payload || (msg.kind === 'system' ? { t: 'system', text: msg.body?.text || '' } : undefined));
+  const botPlain = (msg) => msg.body?.poll ? { t: 'poll', bot: true, question: String(msg.body.poll.question || ''), options: (msg.body.poll.options || []).map(String), multiple: !!msg.body.poll.multiple }
+    : { t: 'bot', text: String(msg.body?.text || '') };
+  const plainOf = (msg) => msg.kind === 'bot' ? botPlain(msg) : msg.kind === 'call' ? { t: 'call', ...msg.body } : msg.kind === 'gift' ? { t: 'gift', ...msg.body } : msg.kind === 'deleted' ? { t: 'deleted' } : (S.plain.get(msg.id) || msg.payload || (msg.kind === 'system' ? { t: 'system', text: msg.body?.text || '' } : undefined));
   function previewOf(p) {
     if (!p) return '…';
     if (p.t === 'text') return p.text.replace(/\s+/g, ' ');
     if (p.t === 'file' && p.round) return 'Видеосообщение';
     if (p.t === 'file') return (isGif(p) ? 'GIF' : p.mime.startsWith('image/') ? 'Фото' : p.mime.startsWith('audio/') && p.wave ? 'Голосовое сообщение' : 'Файл: ' + p.name) + (p.caption ? ' · ' + p.caption : '');
     if (p.t === 'system') return p.text;
+    if (p.t === 'bot') return '🤖 ' + p.text.replace(/\s+/g, ' ');
     if (p.t === 'deleted') return 'Сообщение удалено';
     if (p.t === 'poll') return '📊 ' + p.question;
     if (p.t === 'call') return p.group ? '📞 Групповой звонок' : (p.status === 'ended' ? '📞 ' : '📵 ') + (p.kind === 'video' ? 'Видеозвонок' : 'Звонок');
@@ -1276,6 +1284,7 @@
         allowed(chat, 'add') ? action('plus', 'Добавить', () => openPicker('add', chat.id)) : null,
         allowed(chat, 'add') ? action('link', 'Ссылка', () => openInvites(chat)) : null,
         isAdminOf(chat) ? action('edit', 'Настройки', () => openGroupSettings(chat)) : action('shield', 'Шифрование', () => openInfo(chat.id)),
+        isAdminOf(chat) ? action('bot', 'Бот', () => openBotSettings(chat)) : null,
         action('leave', 'Выйти', async () => {
           if (!confirm(`Покинуть группу «${chat.title}»?`)) return;
           try { await api(`/api/chats/${chat.id}/leave`, { method: 'POST' }); closePage(); } catch (e) { toast(e.message); }
@@ -1456,12 +1465,13 @@
     const p = plainOf(m) || { t: 'error', reason: 'fail' };
     if (p.t === 'system') return h('div', { class: 'sys' }, p.text);
     if (p.t === 'call') return callPill(m, p, chat);
-    const mine = m.senderId === S.me.id;
+    const isBot = m.kind === 'bot';
+    const mine = !isBot && m.senderId === S.me.id;
     const near = (a, b) => a && b && a.kind === 'msg' && b.kind === 'msg' && a.senderId === b.senderId && p.t !== 'gift' &&
       Math.abs(a.createdAt - b.createdAt) < 5 * 60000 && sameDay(a.createdAt, b.createdAt);
     const firstOfGroup = !near(prev, m);
     const lastOfGroup = !near(m, next);
-    const sender = memberOf(chat, m.senderId);
+    const sender = isBot ? BOT_USER : memberOf(chat, m.senderId);
     const senderName = sender?.displayName || 'Бывший участник';
     const showAvatar = chat.type === 'group' && !mine;
 
@@ -1475,7 +1485,10 @@
     if (p.reply) {
       bubble.append(h('button', { class: 'quote', onclick: () => p.reply.id && jumpTo(p.reply.id) }, h('b', null, p.reply.name), h('span', null, p.reply.text)));
     }
-    if (p.t === 'text') {
+    if (p.t === 'bot') {
+      bubble.classList.add('bot-b');
+      bubble.append(h('span', { style: 'white-space:pre-wrap' }, ...linkify(p.text)), meta);
+    } else if (p.t === 'text') {
       bubble.append(...richText(p.text, chat));
       if (p.link) bubble.append(linkCard(p.link));
       bubble.append(meta);
@@ -1520,7 +1533,7 @@
           'aria-pressed': String(minex), onclick: () => react(m, r.emoji) }, h('span', { class: 'emo' }, r.emoji), r.users.length > 1 ? String(r.users.length) : '');
       })));
     }
-    const live = !lite && p.t !== 'error' && p.t !== 'deleted' && p.t !== 'gift' && !m.pending;
+    const live = !lite && !isBot && p.t !== 'error' && p.t !== 'deleted' && p.t !== 'gift' && !m.pending;
     const actions = live ? h('div', { class: 'msg-actions' },
       h('button', { 'aria-label': 'Ответить', title: 'Ответить', onclick: () => setReply(m, p, senderName) }, icon('reply', 18)),
       p.t === 'text' && !isSecret(chat) ? h('button', { 'aria-label': 'Копировать', title: 'Копировать', onclick: () => copyText(p.text) }, icon('copy', 17)) : null) : null;
@@ -1558,7 +1571,7 @@
       ['touchend', 'touchcancel'].forEach((ev) => bubble.addEventListener(ev, () => clearTimeout(timer), { passive: true }));
     }
     const row = h('div', { class: 'row ' + (mine ? 'out' : 'in') + (firstOfGroup ? ' gap' : '') + (S.fresh.has(m.id) ? ' pop' : '') });
-    if (showAvatar) row.append(lastOfGroup ? userAvatar(sender || { displayName: '?', color: 7 }, 32) : h('span', { class: 'av-space' }));
+    if (showAvatar) row.append(!lastOfGroup ? h('span', { class: 'av-space' }) : isBot ? botAvatar(32) : userAvatar(sender || { displayName: '?', color: 7 }, 32));
     const parts = mine ? [actions, bubble] : [bubble, actions];
     for (const part of parts) if (part) row.append(part);
     return row;
@@ -1933,6 +1946,7 @@
     };
     const closeMentions = () => { mentionPop.hidden = true; mList = []; };
     const pickMention = (u) => {
+      if (u.cmd) { input.value = '/' + u.cmd; closeMentions(); submit(); return; }
       const tok = mentionToken();
       if (!tok) return closeMentions();
       const end = input.selectionStart;
@@ -1942,6 +1956,17 @@
       closeMentions(); setDraft(chat.id, input.value); syncBtn(); input.focus();
     };
     const drawMentions = () => {
+      const live0 = S.chats.get(chat.id) || chat;
+      const cm = live0.bot && /^\/([a-zа-яё]*)$/i.exec(input.value);
+      if (cm) {
+        mList = BOT_CMDS.filter(([c]) => c.startsWith(cm[1].toLowerCase())).map(([cmd, d]) => ({ cmd, d }));
+        if (!mList.length) return closeMentions();
+        mIdx = Math.min(mIdx, mList.length - 1);
+        clear(mentionPop).append(...mList.map((u, i) => h('button', { type: 'button', role: 'option', class: 'mention-opt', 'aria-selected': String(i === mIdx),
+          onpointerdown: (e) => e.preventDefault(), onclick: () => pickMention(u) }, botAvatar(32), h('span', { class: 'grow' }, h('b', null, '/' + u.cmd), h('small', null, u.d)))));
+        mentionPop.hidden = false;
+        return;
+      }
       const tok = mentionToken();
       const live = S.chats.get(chat.id) || chat;
       mList = tok ? live.members.filter((m) => m.id !== S.me.id &&
@@ -2015,7 +2040,14 @@
       input.value = '';
       autosize(); closeMentions();
       const link = takeLink(text);
-      if (S.edit) saveEdit(text, link); else { setDraft(chat.id, ''); sendPayload(link ? { t: 'text', text, link } : { t: 'text', text }); }
+      if (S.edit) saveEdit(text, link);
+      else {
+        setDraft(chat.id, '');
+        sendPayload(link ? { t: 'text', text, link } : { t: 'text', text }).then(() => {
+          const cmd = /^\/([a-zа-яё]+)/i.exec(text);
+          if (cmd && (S.chats.get(chat.id) || chat).bot) api(`/api/chats/${chat.id}/bot/command`, { body: { cmd: cmd[1] } }).catch((e) => toast(e.message));
+        });
+      }
       syncBtn();
       if (!COARSE) input.focus();
     };
@@ -4126,6 +4158,60 @@
         catch (e) { toast(e.message); }
       } }, 'Вступить в группу'),
     ]);
+  }
+
+  /* ---------- Тихобот ---------- */
+  const REPEAT_NAMES = { once: 'один раз', daily: 'каждый день', weekdays: 'по будням', weekly: 'каждую неделю' };
+  async function openBotSettings(chat) {
+    let cfg;
+    try { cfg = await api(`/api/chats/${chat.id}/bot`); } catch (e) { return toast(e.message); }
+    const en = h('button', { class: 'sw', role: 'switch', 'aria-checked': String(cfg.enabled), 'aria-label': 'Тихобот включён',
+      onclick: () => en.setAttribute('aria-checked', String(en.getAttribute('aria-checked') !== 'true')) });
+    const welcome = h('textarea', { class: 'input', rows: 2, maxlength: 1000, placeholder: 'Например: Привет, {имя}! Почитай /правила 🙂', style: 'height:auto;padding:12px' });
+    welcome.value = cfg.welcome;
+    const rules = h('textarea', { class: 'input', rows: 3, maxlength: 3000, placeholder: 'Например: без спама и рекламы', style: 'height:auto;padding:12px' });
+    rules.value = cfg.rules;
+    const taskRow = (t) => h('div', { class: 'card-row' }, h('span', { class: 'ic' }, icon(t.kind === 'poll' ? 'poll' : 'clock', 18)),
+      h('span', { class: 'grow' }, h('b', null, t.kind === 'poll' ? 'Опрос: ' + t.body.poll.question : t.body.text), h('small', null, `${whenText(t.nextAt)} · ${REPEAT_NAMES[t.repeat]}`)),
+      h('button', { class: 'icon-btn', 'aria-label': 'Удалить задание', onclick: async () => { try { await api('/api/bot-tasks/' + t.id, { method: 'DELETE' }); close(); openBotSettings(chat); } catch (e) { toast(e.message); } } }, icon('trash', 18)));
+    const close = modal('Тихобот', [
+      h('div', { class: 'bot-hero' }, botAvatar(56), h('div', null, h('b', null, 'Тихобот'), h('small', null, 'Встроенный помощник группы. Его сообщения создаёт сервер, поэтому они не шифруются сквозным шифрованием.'))),
+      h('div', { class: 'card' }, h('div', { class: 'card-row' }, h('span', { class: 'grow' }, h('b', null, 'Бот включён'), h('small', null, 'Команды: /помощь /правила /кто /монетка /кубик')), en)),
+      h('label', { class: 'field-label' }, 'Приветствие новых участников ({имя} — имя)', welcome),
+      h('label', { class: 'field-label' }, 'Правила группы (команда /правила)', rules),
+      h('button', { class: 'btn block', onclick: async () => {
+        try { await api(`/api/chats/${chat.id}/bot`, { method: 'PUT', body: { enabled: en.getAttribute('aria-checked') === 'true', welcome: welcome.value, rules: rules.value } }); toast('Бот сохранён'); close(); }
+        catch (e) { toast(e.message); }
+      } }, 'Сохранить'),
+      h('div', { class: 'section-title' }, 'По расписанию'),
+      cfg.tasks.length ? h('div', { class: 'card' }, cfg.tasks.map(taskRow)) : h('p', { class: 'muted', style: 'margin:0;font-size:13px' }, 'Заданий пока нет'),
+      h('div', { class: 'report-actions' },
+        h('button', { class: 'btn ghost', onclick: () => { close(); botTaskEditor(chat, 'text'); } }, icon('clock', 18), 'Напоминание'),
+        h('button', { class: 'btn ghost', onclick: () => { close(); botTaskEditor(chat, 'poll'); } }, icon('poll', 18), 'Опрос')),
+    ]);
+  }
+  function botTaskEditor(chat, kind) {
+    const local = (ts) => new Date(ts - new Date(ts).getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    const when = h('input', { class: 'input', type: 'datetime-local', value: local(Date.now() + 3600000) });
+    let repeat = 'once';
+    const seg = h('div', { class: 'theme-seg wrap' }, Object.entries(REPEAT_NAMES).map(([k, l]) => h('button', { 'aria-pressed': String(k === repeat), onclick: (e) => {
+      repeat = k; seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === e.currentTarget)));
+    } }, l)));
+    const text = h('textarea', { class: 'input', rows: 3, maxlength: 2000, placeholder: 'Например: Не забудьте сдать отчёт до пятницы', style: 'height:auto;padding:12px' });
+    const question = h('input', { class: 'input', maxlength: 200, placeholder: 'Например: Во сколько собираемся?' });
+    const opts = h('div', { class: 'poll-opts' }, [0, 1, 2].map((i) => h('input', { class: 'input', maxlength: 100, placeholder: 'Вариант ' + (i + 1) })));
+    const close = modal(kind === 'poll' ? 'Опрос по расписанию' : 'Напоминание', [
+      kind === 'poll' ? h('label', { class: 'field-label' }, 'Вопрос', question) : h('label', { class: 'field-label' }, 'Текст', text),
+      kind === 'poll' ? h('div', { class: 'field-label' }, 'Варианты', opts) : null,
+      h('label', { class: 'field-label' }, 'Когда', when),
+      h('div', { class: 'field-label' }, 'Повторять', seg),
+      h('button', { class: 'btn block', onclick: async () => {
+        const body = { kind, firstAt: new Date(when.value).getTime(), repeat, tz: new Date().getTimezoneOffset() };
+        if (kind === 'poll') Object.assign(body, { question: question.value, options: [...opts.querySelectorAll('input')].map((i) => i.value) });
+        else body.text = text.value;
+        try { await api(`/api/chats/${chat.id}/bot/tasks`, { body }); close(); toast('Задание добавлено'); openBotSettings(chat); } catch (e) { toast(e.message); }
+      } }, 'Добавить'),
+    ].filter(Boolean));
   }
 
   /* ---------- Ветки ответов ---------- */
