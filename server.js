@@ -2549,7 +2549,8 @@ app.use('/api', (err, req, res, next) => {
 
 /* Подтверждение для приложения Android (Trusted Web Activity) — тогда оно открывается без адресной строки */
 app.get('/.well-known/assetlinks.json', (req, res) => {
-  const prints = String(process.env.ANDROID_SHA256 || '').split(',').map((x) => x.replace(/[^a-f0-9]/gi, '').toUpperCase())
+  // по умолчанию — отпечаток ключа android/tiho-release.keystore, которым GitHub подписывает APK
+  const prints = String(process.env.ANDROID_SHA256 || '75:A8:6F:04:2A:9B:E0:16:82:B7:D7:F5:69:8F:46:E2:B9:EF:0D:58:75:2A:8F:7A:E6:8F:C6:51:DF:8B:12:B4').split(',').map((x) => x.replace(/[^a-f0-9]/gi, '').toUpperCase())
     .filter((x) => x.length === 64).map((x) => x.match(/../g).join(':'));
   res.json(prints.length ? [{ relation: ['delegate_permission/common.handle_all_urls'],
     target: { namespace: 'android_app', package_name: process.env.ANDROID_PACKAGE || 'ru.tiho.app', sha256_cert_fingerprints: prints } }] : []);

@@ -1,17 +1,22 @@
 # Сборка приложения «Тихо» для Android.
-# GitHub → вкладка Actions → «Android APK» → Run workflow → укажите постоянный адрес мессенджера.
+# Запускается сама, когда меняется адрес в android/app-url.txt (или вручную: Actions → «Android APK» → Run workflow).
+# Готовый файл: https://github.com/macantopegr-collab/Tiho-messenger/releases/latest/download/tiho.apk
 name: Android APK
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
   workflow_dispatch:
     inputs:
       url:
-        description: 'Постоянный адрес мессенджера, например https://chat.example.ru'
-        required: true
-      version:
-        description: 'Номер версии (целое число, увеличивайте при каждой сборке)'
+        description: 'Адрес мессенджера (если пусто — из android/app-url.txt)'
         required: false
-        default: '1'
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -30,33 +35,47 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      # Необязательно: свой ключ подписи в секретах репозитория (ANDROID_KEYSTORE_B64 и пароли).
-      # Без него APK подписывается отладочным ключом — приложение работает, но может показывать адресную строку.
+      # Ключ подписи. Если в секретах репозитория задан свой (ANDROID_KEYSTORE_B64 и пароли) — берём его,
+      # иначе общий ключ из репозитория: так обновления ставятся поверх старой версии.
       - name: Ключ подписи
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          S_STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          S_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          S_KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           if [ -n "$KEYSTORE_B64" ]; then
             echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/tiho.keystore"
-            echo "KEYSTORE_FILE=$RUNNER_TEMP/tiho.keystore" >> "$GITHUB_ENV"
+            { echo "KEYSTORE_FILE=$RUNNER_TEMP/tiho.keystore"; echo "KEYSTORE_PASSWORD=$S_STORE_PASS"; echo "KEY_ALIAS=$S_ALIAS"; echo "KEY_PASSWORD=$S_KEY_PASS"; } >> "$GITHUB_ENV"
+          else
+            { echo "KEYSTORE_FILE=$GITHUB_WORKSPACE/android/tiho-release.keystore"; echo "KEYSTORE_PASSWORD=tiho-public-key"; echo "KEY_ALIAS=tiho"; echo "KEY_PASSWORD=tiho-public-key"; } >> "$GITHUB_ENV"
           fi
 
       - name: Сборка
         env:
-          APP_URL: ${{ inputs.url }}
-          VERSION_CODE: ${{ inputs.version }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          INPUT_URL: ${{ inputs.url }}
+          VERSION_CODE: ${{ github.run_number }}
+          VERSION_NAME: 1.${{ github.run_number }}
         run: |
+          APP_URL="${INPUT_URL:-$(head -1 android/app-url.txt | tr -d '[:space:]')}"
           case "$APP_URL" in https://*) ;; *) echo "Адрес должен начинаться с https://"; exit 1;; esac
-          gradle -p android assembleRelease --no-daemon
+          echo "APP_URL=$APP_URL" >> "$GITHUB_ENV"
+          APP_URL="$APP_URL" gradle -p android assembleRelease --no-daemon
           cp android/app/build/outputs/apk/release/*.apk tiho.apk
 
-      - name: Отпечаток ключа (для ANDROID_SHA256 на сервере)
+      - name: Отпечаток ключа
         run: |
           APKSIGNER=$(ls $ANDROID_HOME/build-tools/*/apksigner | tail -1)
           $APKSIGNER verify --print-certs tiho.apk | grep -i "SHA-256" | head -1 | tee fingerprint.txt
+
+      - name: Публикация (прямая ссылка на APK)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="apk-${{ github.run_number }}"
+          gh release create "$TAG" tiho.apk fingerprint.txt --latest \
+            --title "Тихо для Android 1.${{ github.run_number }}" \
+            --notes "Адрес: $APP_URL. Скачайте tiho.apk на телефон и установите (разрешите установку из браузера)."
 
       - uses: actions/upload-artifact@v4
         with:
