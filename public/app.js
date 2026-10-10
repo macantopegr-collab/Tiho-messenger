@@ -532,7 +532,7 @@
   function startApp() {
     clear(root);
     const list = h('ul', { class: 'chat-list', 'aria-label': 'Чаты' });
-    const searchInput = h('input', { type: 'search', placeholder: 'Поиск чатов и людей', 'aria-label': 'Поиск', oninput: onSearch });
+    const searchInput = h('input', { type: 'search', placeholder: 'Найти по @юзернейму или имени', 'aria-label': 'Поиск', oninput: onSearch });
     const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Фильтр' },
       [['all', 'Все'], ['direct', 'Личные'], ['group', 'Группы'], ['unread', 'Непрочитанные']].map(([k, label]) =>
         h('button', { class: 'chip', 'data-k': k, 'aria-pressed': String(S.filter === k), onclick: () => {
@@ -558,7 +558,7 @@
     renderMe();
     renderList();
     renderPane();
-    loadChats();
+    loadChats().then(openFromLink);
     connect();
   }
 
@@ -652,20 +652,51 @@
         for (const u of fresh) {
           list.append(h('li', null, h('button', { class: 'chat-item', onclick: () => openDirect(u.id) },
             userAvatar(u, 52),
-            h('div', { class: 'ci-body' }, h('span', { class: 'ci-name' }, u.displayName), h('span', { class: 'ci-prev' }, '@' + u.username)))));
+            h('div', { class: 'ci-body' }, h('span', { class: 'ci-name' }, u.displayName), h('span', { class: 'ci-prev uname' }, '@' + u.username)),
+            h('span', { class: 'chip-status on' }, 'Написать'))));
         }
       }
     }
     if (!list.children.length) {
-      list.append(h('li', { class: 'list-empty' }, qv
-        ? (qv.length < 2 ? 'Введите ещё символ' : 'Ничего не найдено. Ищите людей по логину.')
-        : 'Здесь пока пусто. Нажмите карандаш внизу, найдите собеседника по логину и напишите первым.'));
+      const uq = qv.replace(/^@/, '');
+      if (qv) {
+        list.append(h('li', { class: 'list-empty' }, uq.length < 2 ? 'Введите ещё символ'
+          : /^[a-z0-9_]+$/i.test(uq) ? `Пользователь @${uq} не найден. Проверьте написание юзернейма.` : 'Ничего не найдено'));
+      } else {
+        list.append(h('li', { class: 'list-empty' },
+          h('div', { class: 'empty-ic' }, icon('search', 28)),
+          h('b', null, 'Здесь пока пусто'),
+          h('span', null, 'Найдите собеседника по юзернейму или отправьте ему свою ссылку.'),
+          h('div', { class: 'empty-actions' },
+            h('button', { class: 'btn', onclick: () => S.refs.searchInput?.focus() }, icon('search', 18), 'Найти по юзернейму'),
+            h('button', { class: 'btn ghost', onclick: shareMyLink }, icon('link', 18), 'Моя ссылка'))));
+      }
     }
   }
 
   function updateTitle() {
     const n = [...S.chats.values()].reduce((s, c) => s + (c.unread || 0), 0);
     document.title = n ? `(${n}) Тихо` : 'Тихо';
+  }
+
+  const myLink = () => `${location.origin}/@${S.me.username}`;
+  async function shareMyLink() {
+    const url = myLink();
+    if (navigator.share && COARSE) {
+      try { await navigator.share({ title: 'Тихо', text: `Напиши мне в «Тихо»: @${S.me.username}`, url }); return; } catch { /* отменили */ }
+    }
+    copyText(url);
+  }
+  /* Открыли ссылку вида /@username — сразу открываем чат с этим человеком */
+  async function openFromLink() {
+    const m = /^\/@([a-zA-Z0-9_]{3,32})\/?$/.exec(location.pathname);
+    if (!m) return;
+    history.replaceState(null, '', '/');
+    if (m[1].toLowerCase() === S.me.username.toLowerCase()) { toast('Это ваша ссылка — отправьте её собеседнику'); return; }
+    try {
+      const { user } = await api('/api/users/by-name/' + encodeURIComponent(m[1]));
+      openDirect(user.id);
+    } catch { toast(`Пользователь @${m[1]} не найден`); }
   }
 
   async function openDirect(userId) {
@@ -1490,7 +1521,7 @@
     const picked = new Map();
     const existing = chatId ? new Set(S.chats.get(chatId).members.map((m) => m.id)) : new Set();
     const titleInput = h('input', { class: 'input', placeholder: 'Например, Поход в Карелию', maxlength: 64 });
-    const search = h('input', { class: 'input', type: 'search', placeholder: 'Логин или имя', autocapitalize: 'none' });
+    const search = h('input', { class: 'input', type: 'search', placeholder: '@юзернейм или имя', autocapitalize: 'none' });
     const results = h('div', { class: 'card' });
     const pickedBox = h('div', { class: 'picked' });
     const go = h('button', { class: 'btn block', disabled: true }, mode === 'group' ? 'Создать группу' : 'Добавить');
@@ -1507,7 +1538,7 @@
       list = list.filter((u) => !existing.has(u.id));
       if (!list.length) {
         results.append(h('div', { class: 'card-row' }, h('span', { class: 'muted' },
-          qv.length >= 2 ? 'Никого не нашли' : 'Начните вводить логин собеседника')));
+          qv.length >= 2 ? `Никого не нашли по «${qv}»` : 'Начните вводить юзернейм собеседника')));
       }
       for (const u of list) {
         const on = picked.has(u.id);
@@ -1552,6 +1583,7 @@
     const body = [];
     if (mode === 'group') body.push(h('label', { class: 'field-label' }, 'Название группы', titleInput));
     body.push(h('label', { class: 'field-label' }, mode === 'direct' ? 'Кому написать' : 'Участники', search));
+    if (mode === 'direct') body.push(h('button', { class: 'btn ghost block', onclick: () => { close(); shareMyLink(); } }, icon('link', 18), 'Отправить свою ссылку'));
     if (mode !== 'direct') body.push(pickedBox);
     body.push(results);
     if (mode === 'add') body.push(h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Новые участники увидят только сообщения, отправленные после их добавления: старые зашифрованы не для них.'));
@@ -1659,8 +1691,15 @@
     const close = modal('Настройки', [
       h('div', { class: 'profile-card' }, userAvatar(S.me, 72),
         h('div', { style: 'min-width:0' }, h('b', null, S.me.displayName), h('span', { class: 'muted' }, '@' + S.me.username))),
-      section('Профиль', h('div', { class: 'card', style: 'padding:14px 16px' },
-        h('label', { class: 'field-label' }, 'Имя, которое видят другие', h('div', { style: 'display:flex;gap:8px' }, nameInput, saveName)))),
+      section('Профиль', h('div', { class: 'card', style: 'padding:14px 16px;display:flex;flex-direction:column;gap:14px' },
+        h('label', { class: 'field-label' }, 'Имя, которое видят другие', h('div', { style: 'display:flex;gap:8px' }, nameInput, saveName)),
+        h('div', { class: 'field-label' }, 'Юзернейм — по нему вас находят',
+          h('div', { class: 'secret' }, h('code', null, '@' + S.me.username),
+            h('button', { class: 'icon-btn', 'aria-label': 'Скопировать юзернейм', onclick: () => copyText('@' + S.me.username) }, icon('copy', 18)))),
+        h('div', { class: 'field-label' }, 'Ваша ссылка — откроет чат с вами',
+          h('div', { class: 'secret' }, h('code', null, myLink()),
+            h('button', { class: 'icon-btn', 'aria-label': 'Поделиться ссылкой', onclick: shareMyLink }, icon('link', 18))))
+      )),
       section('Безопасность', h('div', { class: 'card' }, gRow, tfaRow)),
       section('Оформление', themeSeg),
       section('Уведомления', h('div', { class: 'card' },

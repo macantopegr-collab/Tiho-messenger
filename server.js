@@ -117,7 +117,9 @@ const q = {
   purgeSessions: db.prepare('DELETE FROM sessions WHERE expires_at <= ?'),
   searchUsers: db.prepare(`SELECT id, username, display_name, color FROM users
                            WHERE (username LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\') AND id != ?
-                           ORDER BY username LIMIT 20`),
+                           ORDER BY CASE WHEN lower(username) = lower(?) THEN 0
+                                         WHEN username LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END, length(username), username
+                           LIMIT 20`),
   chatById: db.prepare('SELECT * FROM chats WHERE id = ?'),
   chatByDirectKey: db.prepare('SELECT * FROM chats WHERE direct_key = ?'),
   insertChat: db.prepare('INSERT INTO chats (type, title, direct_key, created_by, created_at) VALUES (?, ?, ?, ?, ?)'),
@@ -508,8 +510,15 @@ app.patch('/api/me', auth, json, (req, res) => {
 app.get('/api/users/search', auth, (req, res) => {
   const s = String(req.query.q || '').trim().replace(/^@/, '');
   if (s.length < 2) return res.json({ users: [] });
-  const like = '%' + s.replace(/[\\%_]/g, (c) => '\\' + c) + '%';
-  res.json({ users: q.searchUsers.all(like, like, req.user.id).map(publicUser) });
+  const esc = s.replace(/[\\%_]/g, (c) => '\\' + c);
+  res.json({ users: q.searchUsers.all('%' + esc + '%', '%' + esc + '%', req.user.id, s, esc + '%').map(publicUser) });
+});
+
+/* Профиль по юзернейму — для ссылок вида https://адрес/@username */
+app.get('/api/users/by-name/:username', auth, (req, res) => {
+  const u = q.userByName.get(String(req.params.username).replace(/^@/, ''));
+  if (!u) return fail(res, 404, 'Пользователь не найден');
+  res.json({ user: publicUser(u) });
 });
 
 app.get('/api/users/:id', auth, (req, res) => {

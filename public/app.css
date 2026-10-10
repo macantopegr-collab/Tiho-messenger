@@ -382,3 +382,10 @@ svg{display:block;flex:none}
 .rec-wave{flex:1;min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:2px;height:28px;overflow:hidden}
 .rec-wave i{width:3px;flex:none;border-radius:2px;background:var(--accent)}
 .reply-bar>svg{color:var(--accent)}
+
+/* поиск по юзернейму */
+.list-empty{display:flex;flex-direction:column;align-items:center;gap:8px}
+.list-empty b{color:var(--text);font-size:16px}
+.empty-ic{width:56px;height:56px;border-radius:18px;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;margin-bottom:4px}
+.empty-actions{display:flex;flex-direction:column;gap:8px;margin-top:8px;width:100%;max-width:260px}
+.ci-prev.uname{color:var(--accent);font-weight:500}
