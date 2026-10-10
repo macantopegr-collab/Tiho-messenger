@@ -43,6 +43,18 @@
     play: '<path d="M7 4v16l13-8Z" fill="currentColor" stroke="none"/>',
     pause: '<rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/>',
     link: '<path d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>',
+    phone: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2Z"/>',
+    userCircle: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="10" r="3"/><path d="M6.2 18.4a7 7 0 0 1 11.6 0"/>',
+    chevron: '<path d="m9 6 6 6-6 6"/>',
+    palette: '<path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.5 0-1.2-1-1.5-1-2.5S13.3 15 14.5 15H17a4 4 0 0 0 4-4c0-4.4-4-8-9-8Z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10" cy="7" r="1"/><circle cx="15" cy="7.5" r="1"/>',
+    database: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
+    help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17h.01"/>',
+    bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7Z"/>',
+    smile: '<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/>',
+    more: '<circle cx="12" cy="5" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="19" r="1.4" fill="currentColor"/>',
+    camera: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13.5" r="3.5"/>',
+    volume: '<path d="M4 9v6h4l5 4V5L8 9Z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/>',
+    files: '<path d="M14 3H6v18h12V7Z"/><path d="M14 3v4h4M9 13h6M9 17h6"/>',
     chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>',
   };
   function icon(name, size = 22, sw = 2) {
@@ -80,7 +92,7 @@
   /* ---------- сеть ---------- */
   async function api(path, opts = {}) {
     const init = { method: opts.method || (opts.body || opts.raw ? 'POST' : 'GET'), credentials: 'same-origin', headers: {} };
-    if (opts.raw) { init.body = opts.raw; init.headers['Content-Type'] = 'application/octet-stream'; }
+    if (opts.raw) { init.body = opts.raw; init.headers['Content-Type'] = opts.type || 'application/octet-stream'; }
     else if (opts.body) { init.body = JSON.stringify(opts.body); init.headers['Content-Type'] = 'application/json'; }
     const res = await fetch(path, init);
     let data = {};
@@ -95,6 +107,7 @@
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* приватный режим */ } },
   };
   function applyTheme() {
+    document.documentElement.dataset.size = store.get('tiho-size', 'm');
     const t = store.get('tiho-theme', 'auto');
     if (t === 'auto') document.documentElement.removeAttribute('data-theme');
     else document.documentElement.setAttribute('data-theme', t);
@@ -105,7 +118,7 @@
     me: null, priv: null, pub: null, config: { maxFile: 25 * 1024 * 1024 },
     chats: new Map(), msgs: new Map(), plain: new Map(), userKeys: new Map(),
     active: null, filter: 'all', query: '', people: [], typing: new Map(),
-    reply: null, edit: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
+    tab: 'chats', page: null, reply: null, edit: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
   };
 
   /* ---------- форматирование ---------- */
@@ -163,7 +176,8 @@
   }
   function userAvatar(u, size = 42, dot = false) {
     return h('div', { class: 'av', style: `width:${size}px;height:${size}px;font-size:${Math.round(size * .36)}px;background:${AV_COLORS[(u?.color || 0) % 8]}` },
-      initials(u?.displayName), dot && u?.online ? h('span', { class: 'dot' }) : null);
+      u?.avatar ? h('img', { src: `/api/avatars/${u.id}?v=${u.avatar}`, alt: '', loading: 'lazy', class: 'av-img' }) : initials(u?.displayName),
+      dot && u?.online ? h('span', { class: 'dot' }) : null);
   }
   const lastTs = (c) => c.lastMessage?.createdAt || c.createdAt;
   const memberOf = (chat, id) => chat.members.find((m) => m.id === id);
@@ -245,24 +259,22 @@
 
   /* ================= ВХОД ================= */
   const FEATURES = [
-    ['lock', 'Сквозное шифрование', 'Сообщения и файлы шифруются на вашем устройстве'],
-    ['shield', 'Двухфакторный вход', 'Код из Google Authenticator защитит аккаунт'],
-    ['group', 'Чаты и группы', 'Фото, файлы, ответы и отметки о прочтении'],
+    ['lock', 'Приватность', 'Сквозное шифрование: сообщения видите только вы'],
+    ['bolt', 'Быстро', 'Сообщения, фото и голосовые доходят мгновенно'],
+    ['shield', 'Надёжно', 'Двухфакторный вход и проверка ключей'],
+    ['group', 'Для своих', 'Личные чаты и группы для близких'],
   ];
   function authShell(...content) {
     clear(root);
     const hero = h('section', { class: 'auth-hero', 'aria-hidden': 'true' },
-      h('div', { class: 'brand light' }, h('div', { class: 'logo' }, icon('lock', 22)), h('h1', null, 'Тихо')),
-      h('p', { class: 'hero-title' }, 'Переписка, которую читаете только вы'),
+      logoMark(96),
+      h('div', null, h('p', { class: 'hero-word' }, 'Тихо'), h('p', { class: 'hero-title' }, 'Твои разговоры — только твои')),
       h('ul', { class: 'hero-list' }, FEATURES.map(([ic, t, d]) =>
         h('li', null, h('span', { class: 'hero-ic' }, icon(ic, 20)), h('span', null, h('b', null, t), h('small', null, d))))),
-      h('div', { class: 'hero-bubbles' },
-        h('div', { class: 'hb in' }, 'Привет! Это правда никто не прочитает?'),
-        h('div', { class: 'hb out' }, 'Даже сервер видит только шифр'),
-        h('div', { class: 'hb in short' }, h('span', { class: 'dots' }, h('i'), h('i'), h('i')))));
+    );
     root.append(h('div', { class: 'auth' }, hero,
       h('section', { class: 'auth-main' }, h('div', { class: 'auth-card' },
-        h('div', { class: 'brand mobile-only' }, h('div', { class: 'logo' }, icon('lock', 22)), h('h1', null, 'Тихо')),
+        h('div', { class: 'brand mobile-only' }, logoMark(44), h('h1', { class: 'wordmark' }, 'Тихо')),
         ...content))));
   }
   function passwordField(attrs) {
@@ -532,7 +544,7 @@
   function startApp() {
     clear(root);
     const list = h('ul', { class: 'chat-list', 'aria-label': 'Чаты' });
-    const searchInput = h('input', { type: 'search', placeholder: 'Найти по @юзернейму или имени', 'aria-label': 'Поиск', oninput: onSearch });
+    const searchInput = h('input', { type: 'search', placeholder: 'Поиск', 'aria-label': 'Поиск по чатам и @юзернейму', oninput: onSearch });
     const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Фильтр' },
       [['all', 'Все'], ['direct', 'Личные'], ['group', 'Группы'], ['unread', 'Непрочитанные']].map(([k, label]) =>
         h('button', { class: 'chip', 'data-k': k, 'aria-pressed': String(S.filter === k), onclick: () => {
@@ -540,32 +552,148 @@
           chips.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.k === k)));
           renderList();
         } }, label)));
-    const meBtn = h('button', { class: 'me-btn', onclick: openSettings });
-    const side = h('aside', { class: 'side' },
+    const chatsView = h('div', { class: 'tab-view', 'data-tab': 'chats' },
       h('div', { class: 'side-head' },
-        h('div', { style: 'display:flex;align-items:center;justify-content:space-between' },
-          h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('lock', 20)), h('h1', null, 'Тихо')),
-          h('button', { class: 'icon-btn', 'aria-label': 'Новая группа', title: 'Новая группа', onclick: () => openPicker('group') }, icon('group', 22, 1.8))),
+        h('div', { class: 'head-row' },
+          h('h1', { class: 'wordmark' }, 'Тихо'),
+          h('button', { class: 'icon-btn accent', 'aria-label': 'Новая группа', title: 'Новая группа', onclick: () => openPicker('group') }, icon('group', 22, 1.8))),
         h('label', { class: 'search' }, icon('search', 18), searchInput),
         chips),
       list,
-      h('div', { class: 'side-foot' }, meBtn,
-        h('button', { class: 'fab', 'aria-label': 'Новый чат', title: 'Новый чат', onclick: () => openPicker('direct') }, icon('edit', 22))));
+      h('button', { class: 'fab', 'aria-label': 'Новый чат', title: 'Новый чат', onclick: () => openPicker('direct') }, icon('edit', 22)));
+    const contactsView = h('div', { class: 'tab-view', 'data-tab': 'contacts' });
+    const callsView = h('div', { class: 'tab-view', 'data-tab': 'calls' });
+    const profileView = h('div', { class: 'tab-view', 'data-tab': 'profile' });
+    const tabs = [['chats', 'Чаты', 'chat'], ['contacts', 'Контакты', 'user'], ['calls', 'Звонки', 'phone'], ['profile', 'Профиль', 'userCircle']];
+    const tabbar = h('nav', { class: 'tabbar', 'aria-label': 'Разделы' }, tabs.map(([k, label, ic]) =>
+      h('button', { 'data-k': k, 'aria-current': String(S.tab === k), onclick: () => setTab(k) },
+        h('span', { class: 'tab-ic' }, icon(ic, 24, 1.8), k === 'chats' ? h('span', { class: 'tab-badge' }) : null), label)));
+    const side = h('aside', { class: 'side' }, chatsView, contactsView, callsView, profileView, tabbar);
     const pane = h('main', { class: 'pane' });
     const app = h('div', { class: 'app' }, side, pane);
     root.append(app);
-    S.refs = { app, list, pane, meBtn, searchInput };
-    renderMe();
+    S.refs = { app, list, pane, searchInput, side, tabbar, contactsView, callsView, profileView };
+    setTab(S.tab || 'chats');
     renderList();
     renderPane();
     loadChats().then(openFromLink);
     connect();
   }
 
-  function renderMe() {
-    const b = clear(S.refs.meBtn);
-    b.append(userAvatar({ ...S.me, online: false }, 40),
-      h('span', { style: 'min-width:0' }, h('b', null, S.me.displayName), h('small', null, '@' + S.me.username)));
+  function setTab(k) {
+    S.tab = k;
+    const { side, tabbar } = S.refs;
+    side.querySelectorAll('.tab-view').forEach((v) => { v.hidden = v.dataset.tab !== k; });
+    tabbar.querySelectorAll('button').forEach((b) => b.setAttribute('aria-current', String(b.dataset.k === k)));
+    if (k === 'contacts') renderContacts();
+    if (k === 'calls') renderCalls();
+    if (k === 'profile') renderProfileTab();
+  }
+  function renderMe() { if (S.tab === 'profile') renderProfileTab(); }
+
+  /* «был(а) в сети» */
+  function seenText(u) {
+    if (!u) return '';
+    if (u.online) return 'в сети';
+    if (!u.lastSeen) return 'был(а) давно';
+    const diff = Date.now() - u.lastSeen;
+    if (diff < 60000) return 'был(а) только что';
+    if (diff < 3600000) { const m = Math.floor(diff / 60000); return `был(а) ${m} ${plural(m, 'минуту', 'минуты', 'минут')} назад`; }
+    if (sameDay(u.lastSeen, Date.now())) return 'был(а) сегодня в ' + hm(u.lastSeen);
+    if (sameDay(u.lastSeen, Date.now() - 86400000)) return 'был(а) вчера в ' + hm(u.lastSeen);
+    return 'был(а) ' + new Date(u.lastSeen).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+  }
+
+  /* ---------- Контакты ---------- */
+  function allContacts() {
+    const seen = new Map();
+    for (const c of S.chats.values()) for (const m of c.members) if (m.id !== S.me.id && !seen.has(m.id)) seen.set(m.id, m);
+    return [...seen.values()];
+  }
+  let contactQuery = '', contactFound = [], contactTimer;
+  function renderContacts() {
+    const v = S.refs.contactsView;
+    const keep = v.querySelector('input')?.value ?? contactQuery;
+    const input = h('input', { type: 'search', placeholder: 'Поиск по имени или @юзернейму', 'aria-label': 'Поиск контактов', value: keep });
+    input.addEventListener('input', () => {
+      contactQuery = input.value.trim();
+      clearTimeout(contactTimer);
+      const qv = contactQuery.replace(/^@/, '');
+      if (qv.length < 2) { contactFound = []; drawList(); return; }
+      contactTimer = setTimeout(async () => {
+        try { contactFound = (await api('/api/users/search?q=' + encodeURIComponent(qv))).users; } catch { contactFound = []; }
+        drawList();
+      }, 250);
+      drawList();
+    });
+    const listEl = h('ul', { class: 'chat-list contacts' });
+    const drawList = () => {
+      clear(listEl);
+      const qv = contactQuery.replace(/^@/, '').toLowerCase();
+      const mine = allContacts();
+      let people = mine.filter((u) => !qv || u.displayName.toLowerCase().includes(qv) || u.username.toLowerCase().includes(qv));
+      const known = new Set(mine.map((u) => u.id));
+      const extra = qv.length >= 2 ? contactFound.filter((u) => !known.has(u.id)) : [];
+      people.sort((a, b) => a.displayName.localeCompare(b.displayName, 'ru'));
+      listEl.append(h('li', null, h('button', { class: 'chat-item add-row', onclick: () => openPicker('direct') },
+        h('span', { class: 'add-ic' }, icon('plus', 22, 2.2)), h('span', { class: 'ci-name' }, 'Добавить контакт'))));
+      let letter = '';
+      for (const u of people) {
+        const l = (u.displayName[0] || '#').toUpperCase();
+        if (l !== letter) { letter = l; listEl.append(h('li', { class: 'letter' }, l)); }
+        listEl.append(contactRow(u));
+      }
+      if (extra.length) {
+        listEl.append(h('li', { class: 'list-label' }, 'Найдено по юзернейму'));
+        extra.forEach((u) => listEl.append(contactRow(u)));
+      }
+      if (!people.length && !extra.length) {
+        listEl.append(h('li', { class: 'list-empty' }, qv ? (qv.length < 2 ? 'Введите ещё символ' : `Никого не нашли по «${qv}»`)
+          : 'Контакты появятся, когда вы начнёте переписку. Нажмите «Добавить контакт» и найдите человека по юзернейму.'));
+      }
+    };
+    clear(v).append(
+      h('div', { class: 'side-head' }, h('div', { class: 'head-row' }, h('h1', { class: 'page-title' }, 'Контакты')),
+        h('label', { class: 'search' }, icon('search', 18), input)),
+      listEl);
+    drawList();
+  }
+  function contactRow(u) {
+    return h('li', null, h('button', { class: 'chat-item', onclick: () => openPage({ type: 'contact', userId: u.id, user: u }) },
+      userAvatar(u, 48, true),
+      h('div', { class: 'ci-body' }, h('span', { class: 'ci-name' }, u.displayName),
+        h('span', { class: 'ci-prev' + (u.online ? ' on' : '') }, seenText(u)))));
+  }
+
+  /* ---------- Звонки (пока нет) ---------- */
+  function renderCalls() {
+    clear(S.refs.callsView).append(
+      h('div', { class: 'side-head' }, h('div', { class: 'head-row' }, h('h1', { class: 'page-title' }, 'Звонки'))),
+      h('div', { class: 'list-empty grow-empty' },
+        h('div', { class: 'empty-ic' }, icon('phone', 28)),
+        h('b', null, 'Звонки появятся позже'),
+        h('span', null, 'Защищённые аудио- и видеозвонки — в одном из следующих обновлений. Пока можно отправить голосовое сообщение.')));
+  }
+
+  /* ---------- Профиль и настройки ---------- */
+  function renderProfileTab() {
+    const v = S.refs.profileView;
+    const row = (ic, title, sub, fn, cls) => h('button', { class: 'card-row' + (cls ? ' ' + cls : ''), onclick: fn },
+      h('span', { class: 'ic' }, icon(ic, 20, 1.8)), h('span', { class: 'grow' }, h('b', null, title), sub ? h('small', null, sub) : null),
+      cls ? null : h('span', { class: 'chev' }, icon('chevron', 18)));
+    clear(v).append(
+      h('div', { class: 'side-head' }, h('div', { class: 'head-row' }, h('h1', { class: 'page-title' }, 'Настройки'))),
+      h('div', { class: 'settings-list' },
+        h('div', { class: 'card' }, h('button', { class: 'card-row me-row', onclick: openMyProfile },
+          userAvatar(S.me, 56), h('span', { class: 'grow' }, h('b', null, S.me.displayName), h('small', null, '@' + S.me.username + (S.me.bio ? ' · ' + S.me.bio : ''))),
+          h('span', { class: 'chev' }, icon('chevron', 18)))),
+        h('div', { class: 'card' },
+          row('bell', 'Уведомления', 'Звук, текст в уведомлениях', openNotifications),
+          row('shield', 'Конфиденциальность', 'Google, двухфакторная защита, ключ шифрования', openPrivacy),
+          row('palette', 'Внешний вид', 'Тема, размер текста', openAppearance),
+          row('database', 'Данные и хранилище', 'Кеш файлов на устройстве', openStorage)),
+        h('div', { class: 'card' }, row('help', 'Помощь', 'Как работает шифрование, частые вопросы', openHelp)),
+        h('div', { class: 'card' }, row('logout', 'Выйти', null, logout, 'danger-row'))));
   }
 
   async function loadChats() {
@@ -677,6 +805,8 @@
   function updateTitle() {
     const n = [...S.chats.values()].reduce((s, c) => s + (c.unread || 0), 0);
     document.title = n ? `(${n}) Тихо` : 'Тихо';
+    const tb = S.refs.tabbar?.querySelector('.tab-badge');
+    if (tb) { tb.textContent = n > 99 ? '99+' : n; tb.style.display = n ? '' : 'none'; }
   }
 
   const myLink = () => `${location.origin}/@${S.me.username}`;
@@ -712,7 +842,8 @@
 
   /* ---------- открытый чат ---------- */
   function openChat(id) {
-    const wasOpen = S.active != null;
+    const wasOpen = S.active != null || !!S.page;
+    S.page = null;
     S.active = id;
     S.reply = null;
     S.newBelow = 0;
@@ -731,7 +862,27 @@
     renderList();
     renderPane();
   }
-  window.addEventListener('popstate', () => { if (S.active != null && MOBILE()) closeChat(); });
+  window.addEventListener('popstate', () => {
+    if (!MOBILE()) return;
+    if (S.page) closePage(); else if (S.active != null) closeChat();
+  });
+  function openPage(page) {
+    const was = S.page || S.active != null;
+    S.page = page;
+    S.refs.app.classList.add('in-chat');
+    if (MOBILE()) history.pushState({ page: 1 }, '');
+    else if (!was) { /* на компьютере просто показываем справа */ }
+    renderPane();
+  }
+  function closePage() {
+    S.page = null;
+    if (S.active == null) S.refs.app.classList.remove('in-chat');
+    renderPane();
+  }
+  function openChatPage(chat) {
+    if (chat.type === 'group') openPage({ type: 'group', chatId: chat.id });
+    else { const o = other(chat); openPage({ type: 'contact', userId: o.id, user: o }); }
+  }
 
   async function loadMessages(chatId, older = false) {
     const chat = S.chats.get(chatId);
@@ -786,7 +937,7 @@
     if (ty) return { text: ty, cls: 'typing' };
     if (chat.type === 'direct') {
       const o = other(chat);
-      return o?.online ? { text: 'в сети', cls: 'on' } : { text: '@' + (o?.username || ''), cls: '' };
+      return { text: seenText(o), cls: o?.online ? 'on' : '' };
     }
     const n = chat.members.length;
     const on = chat.members.filter((m) => m.online && m.id !== S.me.id).length;
@@ -795,12 +946,13 @@
 
   function renderPane() {
     const pane = clear(S.refs.pane);
+    if (S.page) { S.refs.msgs = null; S.refs.head = null; return renderPage(pane); }
     const chat = S.chats.get(S.active);
     if (!chat) {
       pane.append(h('div', { class: 'empty-pane' },
-        h('div', { class: 'logo', style: 'width:64px;height:64px;border-radius:20px' }, icon('lock', 30)),
-        h('b', { style: 'font-size:18px;color:var(--text)' }, 'Выберите чат'),
-        h('span', null, 'Все сообщения защищены сквозным шифрованием')));
+        logoMark(72),
+        h('b', { style: 'font-size:20px;color:var(--text)' }, 'Тихо'),
+        h('span', null, 'Твои разговоры — только твои. Выберите чат слева.')));
       S.refs.msgs = null;
       return;
     }
@@ -824,6 +976,99 @@
     if (!COARSE) composer.input.focus();
   }
 
+  /* ---------- Страница контакта / группы ---------- */
+  const logoMark = (size = 40) => h('div', { class: 'logo-mark', style: `width:${size}px;height:${size}px;border-radius:${Math.round(size * .3)}px` }, icon('chat', Math.round(size * .56), 2.2));
+  const freshUser = (id) => { for (const c of S.chats.values()) { const m = memberOf(c, id); if (m) return m; } return null; };
+  const directWith = (id) => [...S.chats.values()].find((c) => c.type === 'direct' && c.members.some((m) => m.id === id) && (id === S.me.id || c.members.some((m) => m.id !== S.me.id)));
+  const URL_RE = /\bhttps?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]]/g;
+  function chatStuff(chat) {
+    const out = { images: [], files: [], links: [] };
+    const box = chat && S.msgs.get(chat.id);
+    for (const m of box?.list || []) {
+      const p = plainOf(m);
+      if (!p) continue;
+      if (p.t === 'file') {
+        if (p.mime.startsWith('image/')) out.images.push(p);
+        else if (!(p.mime.startsWith('audio/') && p.wave)) out.files.push(p);
+      }
+      const text = p.t === 'text' ? p.text : p.t === 'file' ? p.caption : '';
+      for (const u of (text || '').match(URL_RE) || []) out.links.push(u);
+    }
+    out.images.reverse(); out.files.reverse(); out.links.reverse();
+    return out;
+  }
+  function thumb(p, size) {
+    const b = h('button', { class: 'thumb', style: `width:${size}px;height:${size}px`, 'aria-label': 'Открыть фото' }, h('span', { class: 'spin sm dark' }));
+    getFileUrl(p).then((url) => { clear(b).append(h('img', { src: url, alt: '' })); b.onclick = () => openViewer(url, p.name); }).catch(() => clear(b).append(icon('image', 20)));
+    return b;
+  }
+  async function renderPage(pane) {
+    const pg = S.page;
+    const back = h('button', { class: 'icon-btn', 'aria-label': 'Назад', onclick: () => (history.state?.page ? history.back() : closePage()) }, icon('back', 24));
+    const body = h('div', { class: 'page' });
+    pane.append(h('header', { class: 'chat-head page-head' }, back, h('span', { style: 'flex:1' })), body);
+    const isGroup = pg.type === 'group';
+    const chat = isGroup ? S.chats.get(pg.chatId) : directWith(pg.userId);
+    if (isGroup && !chat) return closePage();
+    const u = isGroup ? null : (freshUser(pg.userId) || pg.user);
+    const action = (ic, label, fn) => h('button', { class: 'pg-action', onclick: fn }, icon(ic, 22, 1.8), h('span', null, label));
+
+    const hero = isGroup
+      ? h('div', { class: 'pg-hero' }, avatar(chat, 120), h('h2', null, chat.title),
+        h('span', { class: 'muted' }, `${chat.members.length} ${plural(chat.members.length, 'участник', 'участника', 'участников')}`))
+      : h('div', { class: 'pg-hero' }, userAvatar(u, 120), h('h2', null, u.displayName),
+        h('span', { class: 'pg-seen' + (u.online ? ' on' : '') }, seenText(u)),
+        h('span', { class: 'muted' }, '@' + u.username),
+        u.bio ? h('p', { class: 'pg-bio' }, u.bio) : null);
+    const actions = isGroup
+      ? h('div', { class: 'pg-actions' },
+        action('chat', 'Написать', () => openChat(chat.id)),
+        action('plus', 'Добавить', () => openPicker('add', chat.id)),
+        action('shield', 'Шифрование', () => openInfo(chat.id)),
+        action('leave', 'Выйти', async () => {
+          if (!confirm(`Покинуть группу «${chat.title}»?`)) return;
+          try { await api(`/api/chats/${chat.id}/leave`, { method: 'POST' }); closePage(); } catch (e) { toast(e.message); }
+        }))
+      : h('div', { class: 'pg-actions' },
+        action('chat', 'Написать', () => openDirect(u.id)),
+        action('shield', 'Ключ', async () => { if (chat) openInfo(chat.id); else toast('Сначала напишите собеседнику'); }),
+        action('link', 'Ссылка', () => copyText(`${location.origin}/@${u.username}`)),
+        action('more', 'Ещё', (e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          openMenu(r.left, r.bottom + 6, [['copy', 'Скопировать юзернейм', () => copyText('@' + u.username)]]);
+        }));
+    const listCard = h('div', { class: 'card pg-list' });
+    body.append(hero, actions, listCard);
+
+    const fill = () => {
+      if (S.page !== pg) return;
+      const st = chatStuff(chat);
+      const groups = isGroup ? [] : [...S.chats.values()].filter((c) => c.type === 'group' && c.members.some((m) => m.id === u.id));
+      const row = (ic, label, count, fn) => h('button', { class: 'card-row', onclick: fn, disabled: !count },
+        h('span', { class: 'ic' }, icon(ic, 19, 1.9)), h('span', { class: 'grow' }, h('b', null, label)),
+        h('span', { class: 'muted' }, String(count)), h('span', { class: 'chev' }, icon('chevron', 18)));
+      clear(listCard).append(
+        row('image', 'Медиа', st.images.length, () => modal('Медиа', [h('div', { class: 'media-grid' }, st.images.map((p) => thumb(p, 104)))])),
+        st.images.length ? h('div', { class: 'media-strip' }, st.images.slice(0, 4).map((p) => thumb(p, 72))) : null,
+        row('files', 'Файлы', st.files.length, () => modal('Файлы', [h('div', { class: 'file-list' }, st.files.map((p) => fileEl(p)))])),
+        row('link', 'Ссылки', st.links.length, () => modal('Ссылки', [h('div', { class: 'card' }, st.links.map((l) =>
+          h('a', { class: 'card-row', href: l, target: '_blank', rel: 'noopener noreferrer' }, h('span', { class: 'ic' }, icon('link', 18)), h('span', { class: 'grow link-text' }, l))))])),
+        isGroup ? null : row('group', 'Общие группы', groups.length, () => {
+          const close = modal('Общие группы', [h('div', { class: 'card' }, groups.map((g) => h('button', { class: 'card-row', onclick: () => { close(); openChat(g.id); } },
+            avatar(g, 40), h('span', { class: 'grow' }, h('b', null, g.title), h('small', null, `${g.members.length} ${plural(g.members.length, 'участник', 'участника', 'участников')}`)))))]);
+        }));
+      if (isGroup) {
+        body.querySelector('.pg-members')?.remove();
+        body.append(h('div', { class: 'section pg-members' }, h('div', { class: 'section-title' }, 'Участники'),
+          h('div', { class: 'card' }, chat.members.map((m) => h(m.id === S.me.id ? 'div' : 'button', {
+            class: 'card-row', onclick: m.id === S.me.id ? null : () => openPage({ type: 'contact', userId: m.id, user: m }) },
+          userAvatar(m, 40, true), h('span', { class: 'grow' }, h('b', null, m.displayName + (m.id === S.me.id ? ' (вы)' : '')), h('small', null, seenText(m))))))));
+      }
+    };
+    fill();
+    if (chat && !S.msgs.has(chat.id)) { await loadMessages(chat.id); fill(); }
+  }
+
   function renderHead() {
     const chat = S.chats.get(S.active);
     const head = S.refs.head;
@@ -832,10 +1077,11 @@
     const st = statusLine(chat);
     head.append(
       h('button', { class: 'icon-btn back', 'aria-label': 'Назад к чатам', onclick: () => (history.state?.chat ? history.back() : closeChat()) }, icon('back', 24)),
-      avatar(chat, 42),
-      h('button', { class: 'head-title', onclick: () => openInfo(chat.id) },
+      h('button', { class: 'head-av', 'aria-label': 'Профиль', onclick: () => openChatPage(chat) }, avatar(chat, 42)),
+      h('button', { class: 'head-title', onclick: () => openChatPage(chat) },
         h('b', null, chatTitle(chat)), h('small', { class: st.cls }, st.cls === 'typing' ? dots() : null, st.text)),
-      h('button', { class: 'icon-btn', 'aria-label': 'О чате и шифровании', title: 'О чате и шифровании', onclick: () => openInfo(chat.id) }, icon('info', 22, 1.8)));
+      h('button', { class: 'icon-btn', 'aria-label': 'Код безопасности', title: 'Код безопасности', onclick: () => openInfo(chat.id) }, icon('shield', 22, 1.8)),
+      h('button', { class: 'icon-btn', 'aria-label': chat.type === 'group' ? 'О группе' : 'Профиль собеседника', onclick: () => openChatPage(chat) }, icon('more', 22)));
     const warn = clear(S.refs.keyWarnBox);
     const changed = chat.members.filter((m) => m.id !== S.me.id && keyChanged(m));
     if (changed.length) {
@@ -1155,8 +1401,21 @@
       if (!COARSE) input.focus();
     };
     const attachBtn = h('button', { class: 'icon-btn', style: 'color:var(--muted)', 'aria-label': 'Прикрепить фото или файл', title: 'Прикрепить', onclick: () => fileInput.click() }, icon('attach', 24, 1.8));
-    const row = h('div', { class: 'composer' }, attachBtn, h('label', { class: 'field' }, input), actionBtn, fileInput);
-    const el = h('div', { class: 'composer-wrap' }, replyBox, uploadBox, row);
+    const EMOJI = '😀 😂 🥹 😊 😍 🥰 😘 😎 🤔 😅 😭 😡 🥳 😴 🤗 🙃 👍 👎 👏 🙏 💪 🤝 👋 ✌️ ❤️ 💙 💚 🔥 ✨ 🎉 💯 ✅ ❌ ⚡ 🌙 ☀️ 🌧 🍕 ☕ 🎁 🐱 🐶 🌲 🏔 🚗 ✈️ 📍 ⏰'.split(' ');
+    const emojiPanel = h('div', { class: 'emoji-panel', hidden: true, role: 'dialog', 'aria-label': 'Эмодзи' }, EMOJI.map((e) =>
+      h('button', { type: 'button', 'aria-label': e, onclick: () => {
+        const st = input.selectionStart ?? input.value.length, en = input.selectionEnd ?? st;
+        input.value = input.value.slice(0, st) + e + input.value.slice(en);
+        input.focus(); input.setSelectionRange(st + e.length, st + e.length);
+        input.dispatchEvent(new Event('input'));
+      } }, e)));
+    const emojiBtn = h('button', { type: 'button', class: 'emoji-btn', 'aria-label': 'Эмодзи', 'aria-expanded': 'false', onclick: (ev) => {
+      ev.preventDefault();
+      emojiPanel.hidden = !emojiPanel.hidden;
+      emojiBtn.setAttribute('aria-expanded', String(!emojiPanel.hidden));
+    } }, icon('smile', 22, 1.8));
+    const row = h('div', { class: 'composer' }, attachBtn, h('div', { class: 'field' }, input, emojiBtn), actionBtn, fileInput);
+    const el = h('div', { class: 'composer-wrap' }, replyBox, uploadBox, emojiPanel, row);
 
     /* Голосовое сообщение */
     async function startVoice() {
@@ -1403,7 +1662,19 @@
     }
   }
 
+  let audioCtx;
+  function beep() {
+    try {
+      audioCtx = audioCtx || new AudioContext();
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = 'sine'; o.frequency.setValueAtTime(880, audioCtx.currentTime); o.frequency.exponentialRampToValueAtTime(660, audioCtx.currentTime + 0.12);
+      g.gain.setValueAtTime(0.0001, audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(0.12, audioCtx.currentTime + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
+      o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.26);
+    } catch { /* без звука */ }
+  }
   function notify(chat, msg) {
+    if (store.get('tiho-sound', false)) beep();
     if (!store.get('tiho-notify', false) || !('Notification' in window) || Notification.permission !== 'granted' || !document.hidden) return;
     const showText = store.get('tiho-notify-text', false);
     const sender = memberOf(chat, msg.senderId)?.displayName || '';
@@ -1481,14 +1752,20 @@
       return;
     }
     if (d.type === 'presence') {
-      for (const c of S.chats.values()) { const m = memberOf(c, d.userId); if (m) m.online = d.online; }
+      for (const c of S.chats.values()) { const m = memberOf(c, d.userId); if (m) { m.online = d.online; if (!d.online) m.lastSeen = d.lastSeen; } }
       renderList(); renderHead();
+      if (S.tab === 'contacts') renderContacts();
+      if (S.page?.type === 'contact' && S.page.userId === d.userId) renderPane();
       return;
     }
     if (d.type === 'user') {
-      for (const c of S.chats.values()) { const m = memberOf(c, d.user.id); if (m) m.displayName = d.user.displayName; }
-      if (d.user.id === S.me.id) { S.me.displayName = d.user.displayName; renderMe(); }
+      for (const c of S.chats.values()) {
+        const m = memberOf(c, d.user.id);
+        if (m) Object.assign(m, { displayName: d.user.displayName, bio: d.user.bio, avatar: d.user.avatar, color: d.user.color });
+      }
+      if (d.user.id === S.me.id) { Object.assign(S.me, d.user); renderMe(); }
       renderList(); renderHead();
+      if (S.tab === 'contacts') renderContacts();
     }
   }
   function refreshTyping(chatId) {
@@ -1637,46 +1914,88 @@
     const close = modal(chat.type === 'direct' ? 'Шифрование' : 'Группа', body);
   }
 
-  /* Настройки */
-  async function openSettings() {
-    let info = { twoFactor: false, backupLeft: 0 };
-    try { info = await api('/api/me'); } catch { /* покажем без статуса */ }
-    const nameInput = h('input', { class: 'input', value: S.me.displayName, maxlength: 64, 'aria-label': 'Имя' });
-    const saveName = h('button', { class: 'btn', onclick: async () => {
-      try { const { user } = await api('/api/me', { method: 'PATCH', body: { displayName: nameInput.value } }); S.me = user; renderMe(); toast('Имя сохранено'); } catch (e) { toast(e.message); }
+  /* ---------- разделы настроек ---------- */
+  const settingsSw = (key, label, sub, ic, onTurnOn) => {
+    const b = h('button', { class: 'sw', role: 'switch', 'aria-checked': String(store.get(key, false)), 'aria-label': label });
+    b.addEventListener('click', async () => {
+      let v = b.getAttribute('aria-checked') !== 'true';
+      if (v && onTurnOn) v = await onTurnOn();
+      store.set(key, v); b.setAttribute('aria-checked', String(v));
+    });
+    return h('div', { class: 'card-row' }, h('span', { class: 'ic' }, icon(ic, 19, 1.9)), h('span', { class: 'grow' }, h('b', null, label), h('small', null, sub)), b);
+  };
+
+  function openMyProfile() {
+    const nameInput = h('input', { class: 'input', value: S.me.displayName, maxlength: 64 });
+    const bioInput = h('input', { class: 'input', value: S.me.bio || '', maxlength: 140, placeholder: 'Например: Всё будет хорошо' });
+    const avBox = h('div', { class: 'av-edit' });
+    const fileIn = h('input', { type: 'file', accept: 'image/*', class: 'sr', tabindex: '-1', 'aria-hidden': 'true' });
+    const drawAv = () => clear(avBox).append(userAvatar(S.me, 112),
+      h('button', { class: 'av-cam', 'aria-label': 'Изменить фото', onclick: () => fileIn.click() }, icon('camera', 20, 2)));
+    drawAv();
+    fileIn.addEventListener('change', async () => {
+      const f = fileIn.files[0]; fileIn.value = '';
+      if (!f) return;
+      try {
+        const blob = await squareImage(f, 320);
+        const { user } = await api('/api/me/avatar', { raw: blob, type: 'image/jpeg' });
+        S.me = user; drawAv(); renderMe(); toast('Фото обновлено');
+      } catch (e) { toast(e.message || 'Не удалось загрузить фото'); }
+    });
+    const save = h('button', { class: 'btn block', onclick: async () => {
+      try {
+        const { user } = await api('/api/me', { method: 'PATCH', body: { displayName: nameInput.value, bio: bioInput.value } });
+        S.me = user; renderMe(); close(); toast('Профиль сохранён');
+      } catch (e) { toast(e.message); }
     } }, 'Сохранить');
-    const themeNow = store.get('tiho-theme', 'auto');
-    const themeSeg = h('div', { class: 'theme-seg', role: 'group', 'aria-label': 'Тема' },
-      [['light', 'Светлая', 'sun'], ['dark', 'Тёмная', 'moon'], ['auto', 'Авто', 'auto']].map(([k, l, ic]) => h('button', {
-        'aria-pressed': String(themeNow === k), 'data-k': k, onclick: () => {
-          store.set('tiho-theme', k); applyTheme();
-          themeSeg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.k === k)));
-        } }, icon(ic, 18), l)));
-    const sw = (key, label, sub, ic, onTurnOn) => {
-      const b = h('button', { class: 'sw', role: 'switch', 'aria-checked': String(store.get(key, false)), 'aria-label': label });
-      b.addEventListener('click', async () => {
-        let v = b.getAttribute('aria-checked') !== 'true';
-        if (v && onTurnOn) v = await onTurnOn();
-        store.set(key, v); b.setAttribute('aria-checked', String(v));
-      });
-      return h('div', { class: 'card-row' }, h('span', { class: 'ic' }, icon(ic, 19, 1.9)), h('span', { class: 'grow' }, h('b', null, label), h('small', null, sub)), b);
-    };
+    const close = modal('Мой профиль', [
+      h('div', { class: 'profile-hero' }, avBox, fileIn,
+        S.me.avatar ? h('button', { class: 'link', onclick: async () => {
+          try { const { user } = await api('/api/me/avatar', { method: 'DELETE' }); S.me = user; drawAv(); renderMe(); } catch (e) { toast(e.message); }
+        } }, 'Убрать фото') : null),
+      h('label', { class: 'field-label' }, 'Имя', nameInput),
+      h('label', { class: 'field-label' }, 'Статус', bioInput),
+      h('div', { class: 'field-label' }, 'Юзернейм — по нему вас находят',
+        h('div', { class: 'secret' }, h('code', null, '@' + S.me.username),
+          h('button', { class: 'icon-btn', 'aria-label': 'Скопировать юзернейм', onclick: () => copyText('@' + S.me.username) }, icon('copy', 18)))),
+      h('div', { class: 'field-label' }, 'Ваша ссылка — откроет чат с вами',
+        h('div', { class: 'secret' }, h('code', null, myLink()),
+          h('button', { class: 'icon-btn', 'aria-label': 'Поделиться ссылкой', onclick: shareMyLink }, icon('link', 18)))),
+      save,
+    ]);
+  }
+  /* Квадратная уменьшенная копия фото для аватарки */
+  async function squareImage(file, size) {
+    const bmp = await createImageBitmap(file);
+    const side = Math.min(bmp.width, bmp.height);
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    c.getContext('2d').drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size);
+    bmp.close?.();
+    return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('Не удалось обработать фото'))), 'image/jpeg', 0.86));
+  }
+
+  function openNotifications() {
     const askNotif = async () => {
       if (!('Notification' in window)) { toast('Браузер не поддерживает уведомления'); return false; }
       const p = await Notification.requestPermission();
       if (p !== 'granted') toast('Уведомления запрещены в настройках браузера');
       return p === 'granted';
     };
+    modal('Уведомления', [h('div', { class: 'card' },
+      settingsSw('tiho-notify', 'Уведомления', 'Когда вкладка свёрнута', 'bell', askNotif),
+      settingsSw('tiho-notify-text', 'Текст в уведомлениях', 'Показывать содержимое сообщений', 'eye'),
+      settingsSw('tiho-sound', 'Звук', 'Короткий сигнал о новом сообщении', 'volume'))]);
+  }
+
+  async function openPrivacy() {
+    let info = { twoFactor: false, backupLeft: 0, google: null };
+    try { info = await api('/api/me'); } catch { /* без статуса */ }
     const fp = h('div', { class: 'code fp' });
     crypto.subtle.digest('SHA-256', new TextEncoder().encode(S.pub)).then((d) => {
       const b = new Uint8Array(d);
       for (let i = 0; i < 8; i++) fp.append(h('span', null, ((b[i * 2] << 8 | b[i * 2 + 1]) % 10000).toString().padStart(4, '0')));
     });
-    const tfaRow = h('button', { class: 'card-row', onclick: () => { close(); info.twoFactor ? openDisable2fa(info.backupLeft) : openEnable2fa(); } },
-      h('span', { class: 'ic', style: info.twoFactor ? 'background:var(--ok-soft);color:var(--ok)' : '' }, icon('shield', 19, 1.9)),
-      h('span', { class: 'grow' }, h('b', null, 'Google Authenticator'),
-        h('small', null, info.twoFactor ? `Код при входе · резервных кодов: ${info.backupLeft}` : 'Код из приложения при каждом входе')),
-      h('span', { class: 'chip-status' + (info.twoFactor ? ' on' : '') }, info.twoFactor ? 'Включено' : 'Выключено'));
     const gRow = S.config.googleClientId ? h('button', { class: 'card-row', onclick: async () => {
       if (info.google) {
         if (!confirm('Отвязать Google? Входить можно будет по логину и паролю.')) return;
@@ -1686,32 +2005,70 @@
       h('span', { class: 'ic g-ic' }, h('span', { class: 'g-logo' }, 'G')),
       h('span', { class: 'grow' }, h('b', null, 'Вход через Google'), h('small', null, info.google ? String(info.google) : 'Входите в один клик')),
       h('span', { class: 'chip-status' + (info.google ? ' on' : '') }, info.google ? 'Привязан' : 'Привязать')) : null;
-    const section = (title, ...kids) => h('div', { class: 'section' }, h('div', { class: 'section-title' }, title), ...kids);
-
-    const close = modal('Настройки', [
-      h('div', { class: 'profile-card' }, userAvatar(S.me, 72),
-        h('div', { style: 'min-width:0' }, h('b', null, S.me.displayName), h('span', { class: 'muted' }, '@' + S.me.username))),
-      section('Профиль', h('div', { class: 'card', style: 'padding:14px 16px;display:flex;flex-direction:column;gap:14px' },
-        h('label', { class: 'field-label' }, 'Имя, которое видят другие', h('div', { style: 'display:flex;gap:8px' }, nameInput, saveName)),
-        h('div', { class: 'field-label' }, 'Юзернейм — по нему вас находят',
-          h('div', { class: 'secret' }, h('code', null, '@' + S.me.username),
-            h('button', { class: 'icon-btn', 'aria-label': 'Скопировать юзернейм', onclick: () => copyText('@' + S.me.username) }, icon('copy', 18)))),
-        h('div', { class: 'field-label' }, 'Ваша ссылка — откроет чат с вами',
-          h('div', { class: 'secret' }, h('code', null, myLink()),
-            h('button', { class: 'icon-btn', 'aria-label': 'Поделиться ссылкой', onclick: shareMyLink }, icon('link', 18))))
-      )),
-      section('Безопасность', h('div', { class: 'card' }, gRow, tfaRow)),
-      section('Оформление', themeSeg),
-      section('Уведомления', h('div', { class: 'card' },
-        sw('tiho-notify', 'Уведомления', 'Когда вкладка свёрнута', 'bell', askNotif),
-        sw('tiho-notify-text', 'Текст в уведомлениях', 'Показывать содержимое сообщений', 'eye'))),
-      section('Шифрование', h('div', { class: 'card', style: 'padding:14px 16px;display:flex;flex-direction:column;gap:10px' },
-        h('div', { style: 'display:flex;align-items:center;gap:8px;font-weight:600' }, icon('key', 18), 'Отпечаток вашего ключа'),
-        fp,
-        h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' },
-          'Ключи хранятся только на ваших устройствах. Сервер передаёт зашифрованные сообщения и файлы и не может их расшифровать.'))),
-      h('button', { class: 'btn danger block', onclick: logout }, icon('logout', 18), 'Выйти из аккаунта'),
+    const tfaRow = h('button', { class: 'card-row', onclick: () => { close(); info.twoFactor ? openDisable2fa(info.backupLeft) : openEnable2fa(); } },
+      h('span', { class: 'ic', style: info.twoFactor ? 'background:var(--ok-soft);color:var(--ok)' : '' }, icon('shield', 19, 1.9)),
+      h('span', { class: 'grow' }, h('b', null, 'Google Authenticator'),
+        h('small', null, info.twoFactor ? `Код при входе · резервных кодов: ${info.backupLeft}` : 'Код из приложения при каждом входе')),
+      h('span', { class: 'chip-status' + (info.twoFactor ? ' on' : '') }, info.twoFactor ? 'Включено' : 'Выключено'));
+    const close = modal('Конфиденциальность', [
+      h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Вход'), h('div', { class: 'card' }, gRow, tfaRow)),
+      h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Шифрование'),
+        h('div', { class: 'card', style: 'padding:14px 16px;display:flex;flex-direction:column;gap:10px' },
+          h('div', { style: 'display:flex;align-items:center;gap:8px;font-weight:600' }, icon('key', 18), 'Отпечаток вашего ключа'), fp,
+          h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' },
+            'Ключи хранятся только на ваших устройствах. Сервер передаёт зашифрованные сообщения и файлы и не может их расшифровать.'))),
     ]);
+  }
+
+  function openAppearance() {
+    const themeNow = store.get('tiho-theme', 'auto');
+    const themeSeg = h('div', { class: 'theme-seg', role: 'group', 'aria-label': 'Тема' },
+      [['light', 'Светлая', 'sun'], ['dark', 'Тёмная', 'moon'], ['auto', 'Авто', 'auto']].map(([k, l, ic]) => h('button', {
+        'aria-pressed': String(themeNow === k), 'data-k': k, onclick: () => {
+          store.set('tiho-theme', k); applyTheme();
+          themeSeg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.k === k)));
+        } }, icon(ic, 18), l)));
+    const sizeNow = store.get('tiho-size', 'm');
+    const sizeSeg = h('div', { class: 'theme-seg', role: 'group', 'aria-label': 'Размер текста' },
+      [['s', 'Мелкий'], ['m', 'Обычный'], ['l', 'Крупный']].map(([k, l]) => h('button', {
+        'aria-pressed': String(sizeNow === k), 'data-k': k, onclick: () => {
+          store.set('tiho-size', k); applyTheme();
+          sizeSeg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.k === k)));
+        } }, l)));
+    modal('Внешний вид', [
+      h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Тема'), themeSeg),
+      h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Размер текста в чатах'), sizeSeg),
+    ]);
+  }
+
+  async function openStorage() {
+    let est = '';
+    try { const e = await navigator.storage?.estimate?.(); if (e) est = fileSize(e.usage || 0); } catch { /* нет данных */ }
+    const close = modal('Данные и хранилище', [
+      h('div', { class: 'card' },
+        h('div', { class: 'card-row' }, h('span', { class: 'ic' }, icon('database', 19, 1.9)),
+          h('span', { class: 'grow' }, h('b', null, 'Занято на устройстве'), h('small', null, est || 'неизвестно'))),
+        h('div', { class: 'card-row' }, h('span', { class: 'ic' }, icon('image', 19, 1.9)),
+          h('span', { class: 'grow' }, h('b', null, 'Расшифрованные файлы в памяти'), h('small', null, `${S.fileUrls.size} ${plural(S.fileUrls.size, 'файл', 'файла', 'файлов')}`)))),
+      h('button', { class: 'btn ghost block', onclick: async () => {
+        for (const pr of S.fileUrls.values()) pr.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+        S.fileUrls.clear();
+        try { for (const k of await caches.keys()) await caches.delete(k); } catch { /* нет кеша */ }
+        close(); toast('Кеш очищен');
+      } }, icon('trash', 18), 'Очистить кеш'),
+      h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Переписка и файлы хранятся на сервере в зашифрованном виде и не удаляются при очистке кеша.'),
+    ]);
+  }
+
+  function openHelp() {
+    const qa = [
+      ['Кто может прочитать мои сообщения?', 'Только участники чата. Сообщения и файлы шифруются на вашем устройстве, сервер хранит лишь шифр.'],
+      ['Как найти собеседника?', 'По юзернейму: вкладка «Чаты» → поиск или кнопка-карандаш. Ещё можно отправить свою ссылку из «Мой профиль».'],
+      ['Что такое код безопасности?', 'Цифры в профиле собеседника → «Ключ». Сверьте их при встрече или по звонку: если совпадают, между вами никого нет.'],
+      ['Я забыл пароль', 'Восстановить его нельзя: он защищает ключи шифрования. Можно создать новый аккаунт, но старая переписка останется недоступной.'],
+      ['Как удалить сообщение?', 'Долгое нажатие (или правый клик) на своём сообщении → «Удалить у всех».'],
+    ];
+    modal('Помощь', [h('div', { class: 'card faq' }, qa.map(([q, a]) => h('details', null, h('summary', null, q), h('p', null, a))))]);
   }
 
   function openLinkGoogle() {
@@ -1799,7 +2156,8 @@
       authShell(h('div', { class: 'note' }, icon('warn', 18), h('span', null, 'Шифрование работает только по защищённому адресу (https://). Откройте мессенджер через https.')));
       return;
     }
-    clear(root).append(h('div', { class: 'splash' }, h('div', { class: 'logo pulse' }, icon('lock', 28))));
+    clear(root).append(h('div', { class: 'splash' }, h('div', { class: 'pulse' }, logoMark(88)),
+      h('p', { class: 'splash-word' }, 'Тихо'), h('p', { class: 'splash-tag' }, 'Твои разговоры — только твои')));
     try { S.config = await api('/api/config'); } catch { /* по умолчанию */ }
     let me;
     try { me = await api('/api/me'); } catch (e) {

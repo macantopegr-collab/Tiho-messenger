@@ -18,12 +18,14 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const FILES_DIR = path.join(DATA_DIR, 'files');
+const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
 const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
 const GOOGLE_JWKS_URL = process.env.GOOGLE_JWKS_URL || 'https://www.googleapis.com/oauth2/v3/certs';
 const MAX_FILE = Number(process.env.MAX_FILE_MB || 25) * 1024 * 1024;
 const SESSION_DAYS = 60;
 
 fs.mkdirSync(FILES_DIR, { recursive: true });
+fs.mkdirSync(AVATARS_DIR, { recursive: true });
 
 /* ---------- База ---------- */
 // Встроенная в Node.js база SQLite: ничего не нужно компилировать
@@ -91,6 +93,9 @@ CREATE TABLE IF NOT EXISTS files (
   if (!cols.has('backup_codes')) db.exec("ALTER TABLE users ADD COLUMN backup_codes TEXT NOT NULL DEFAULT '[]'");
   if (!cols.has('google_sub')) db.exec('ALTER TABLE users ADD COLUMN google_sub TEXT');
   if (!cols.has('email')) db.exec('ALTER TABLE users ADD COLUMN email TEXT');
+  if (!cols.has('bio')) db.exec("ALTER TABLE users ADD COLUMN bio TEXT NOT NULL DEFAULT ''");
+  if (!cols.has('last_seen')) db.exec('ALTER TABLE users ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0');
+  if (!cols.has('avatar')) db.exec('ALTER TABLE users ADD COLUMN avatar INTEGER NOT NULL DEFAULT 0');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google ON users(google_sub) WHERE google_sub IS NOT NULL');
   const mcols = new Set(db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name));
   if (!mcols.has('edited_at')) db.exec('ALTER TABLE messages ADD COLUMN edited_at INTEGER');
@@ -115,7 +120,7 @@ const q = {
                            WHERE s.token_hash = ? AND s.expires_at > ?`),
   deleteSession: db.prepare('DELETE FROM sessions WHERE token_hash = ?'),
   purgeSessions: db.prepare('DELETE FROM sessions WHERE expires_at <= ?'),
-  searchUsers: db.prepare(`SELECT id, username, display_name, color FROM users
+  searchUsers: db.prepare(`SELECT id, username, display_name, color, bio, avatar, last_seen FROM users
                            WHERE (username LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\') AND id != ?
                            ORDER BY CASE WHEN lower(username) = lower(?) THEN 0
                                          WHEN username LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END, length(username), username
@@ -126,7 +131,7 @@ const q = {
   insertMember: db.prepare('INSERT OR IGNORE INTO members (chat_id, user_id, joined_at) VALUES (?, ?, ?)'),
   deleteMember: db.prepare('DELETE FROM members WHERE chat_id = ? AND user_id = ?'),
   isMember: db.prepare('SELECT 1 FROM members WHERE chat_id = ? AND user_id = ?'),
-  chatMembers: db.prepare(`SELECT u.id, u.username, u.display_name, u.public_key, u.color, m.last_read_id
+  chatMembers: db.prepare(`SELECT u.id, u.username, u.display_name, u.public_key, u.color, u.bio, u.avatar, u.last_seen, m.last_read_id
                            FROM members m JOIN users u ON u.id = m.user_id WHERE m.chat_id = ? ORDER BY u.id`),
   memberIds: db.prepare('SELECT user_id FROM members WHERE chat_id = ?'),
   myChats: db.prepare(`SELECT c.*, m.last_read_id,
@@ -243,11 +248,9 @@ const cookie = {
     return s;
   },
 };
-const publicUser = (u) => ({ id: u.id, username: u.username, displayName: u.display_name, color: u.color });
-const memberView = (m) => ({
-  id: m.id, username: m.username, displayName: m.display_name, color: m.color,
-  publicKey: m.public_key, lastReadId: m.last_read_id, online: online.has(m.id),
-});
+const publicUser = (u) => ({ id: u.id, username: u.username, displayName: u.display_name, color: u.color,
+  bio: u.bio || '', avatar: u.avatar || 0, lastSeen: u.last_seen || 0, online: online.has(u.id) });
+const memberView = (m) => ({ ...publicUser(m), publicKey: m.public_key, lastReadId: m.last_read_id });
 const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
 function reactionsFor(ids) {
   const out = new Map();
@@ -498,13 +501,48 @@ app.post('/api/2fa/disable', auth, json, (req, res) => {
   res.json({ ok: true });
 });
 
-app.patch('/api/me', auth, json, (req, res) => {
-  const name = cleanName(req.body?.displayName);
-  if (!name) return fail(res, 400, 'Имя не может быть пустым');
-  q.updateProfile.run(name, req.user.id);
-  const u = q.userById.get(req.user.id);
+function announceUser(userId) {
+  const u = q.userById.get(userId);
   for (const id of [u.id, ...q.contactIds.all(u.id, u.id).map((r) => r.id)]) sendTo(id, { type: 'user', user: publicUser(u) });
-  res.json({ user: publicUser(u) });
+  return u;
+}
+app.patch('/api/me', auth, json, (req, res) => {
+  if (req.body?.displayName !== undefined) {
+    const name = cleanName(req.body.displayName);
+    if (!name) return fail(res, 400, 'Имя не может быть пустым');
+    q.updateProfile.run(name, req.user.id);
+  }
+  if (req.body?.bio !== undefined) {
+    const bio = String(req.body.bio || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 140);
+    db.prepare('UPDATE users SET bio = ? WHERE id = ?').run(bio, req.user.id);
+  }
+  res.json({ user: publicUser(announceUser(req.user.id)) });
+});
+
+/* Фото профиля: браузер присылает уже уменьшенное изображение (JPEG/WebP/PNG) */
+app.post('/api/me/avatar', auth, express.raw({ type: ['image/jpeg', 'image/webp', 'image/png'], limit: '1mb' }), (req, res) => {
+  if (!Buffer.isBuffer(req.body) || req.body.length < 100) return fail(res, 400, 'Не удалось прочитать изображение');
+  const b = req.body;
+  const isJpg = b[0] === 0xff && b[1] === 0xd8, isPng = b[0] === 0x89 && b[1] === 0x50, isWebp = b.slice(8, 12).toString() === 'WEBP';
+  if (!isJpg && !isPng && !isWebp) return fail(res, 400, 'Нужна картинка JPEG, PNG или WebP');
+  fs.writeFileSync(path.join(AVATARS_DIR, String(req.user.id)), b);
+  db.prepare('UPDATE users SET avatar = ? WHERE id = ?').run(now(), req.user.id);
+  res.json({ user: publicUser(announceUser(req.user.id)) });
+});
+app.delete('/api/me/avatar', auth, (req, res) => {
+  try { fs.unlinkSync(path.join(AVATARS_DIR, String(req.user.id))); } catch { /* не было */ }
+  db.prepare('UPDATE users SET avatar = 0 WHERE id = ?').run(req.user.id);
+  res.json({ user: publicUser(announceUser(req.user.id)) });
+});
+app.get('/api/avatars/:id', auth, (req, res) => {
+  const id = Number(req.params.id);
+  const file = path.join(AVATARS_DIR, String(id));
+  if (!Number.isInteger(id) || !fs.existsSync(file)) return fail(res, 404, 'Нет фото');
+  const b = fs.readFileSync(file);
+  const type = b[0] === 0xff ? 'image/jpeg' : b[0] === 0x89 ? 'image/png' : 'image/webp';
+  res.setHeader('Content-Type', type);
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.end(b);
 });
 
 app.get('/api/users/search', auth, (req, res) => {
@@ -731,7 +769,9 @@ function sendTo(userId, data) {
   for (const ws of set) if (ws.readyState === 1) ws.send(s);
 }
 function announcePresence(userId, isOnline) {
-  for (const { id } of q.contactIds.all(userId, userId)) sendTo(id, { type: 'presence', userId, online: isOnline });
+  const lastSeen = now();
+  if (!isOnline) db.prepare('UPDATE users SET last_seen = ? WHERE id = ?').run(lastSeen, userId);
+  for (const { id } of q.contactIds.all(userId, userId)) sendTo(id, { type: 'presence', userId, online: isOnline, lastSeen });
 }
 
 server.on('upgrade', (req, socket, head) => {
