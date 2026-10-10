@@ -873,6 +873,75 @@ app.get('/api/files/:id', auth, (req, res) => {
   fs.createReadStream(path.join(FILES_DIR, id)).pipe(res);
 });
 
+/* ---------- Звонки: сервер только передаёт сигналы WebRTC, звук и видео идут напрямую ---------- */
+const TURN_URL = (process.env.TURN_URL || '').trim();
+const TURN_SECRET = (process.env.TURN_SECRET || '').trim();
+const TURN_USER = (process.env.TURN_USER || '').trim();
+const TURN_PASS = (process.env.TURN_PASS || '').trim();
+const STUN_URLS = (process.env.STUN_URLS || 'stun:stun.l.google.com:19302,stun:stun.cloudflare.com:3478').split(',').map((x) => x.trim()).filter(Boolean);
+db.exec(`CREATE TABLE IF NOT EXISTS calls (
+  id TEXT PRIMARY KEY, caller_id INTEGER NOT NULL, callee_id INTEGER NOT NULL, kind TEXT NOT NULL,
+  started_at INTEGER NOT NULL, answered_at INTEGER, ended_at INTEGER, status TEXT NOT NULL DEFAULT 'ringing');
+CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_id); CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_id);`);
+function iceServers(userId) {
+  const list = [{ urls: STUN_URLS }];
+  if (TURN_URL && TURN_SECRET) {
+    const username = `${Math.floor(Date.now() / 1000) + 12 * 3600}:${userId}`;
+    list.push({ urls: TURN_URL.split(','), username, credential: crypto.createHmac('sha1', TURN_SECRET).update(username).digest('base64') });
+  } else if (TURN_URL && TURN_USER) {
+    list.push({ urls: TURN_URL.split(','), username: TURN_USER, credential: TURN_PASS });
+  }
+  return list;
+}
+app.get('/api/calls/ice', auth, (req, res) => res.json({ iceServers: iceServers(req.user.id) }));
+app.get('/api/calls', auth, (req, res) => {
+  const rows = db.prepare('SELECT * FROM calls WHERE caller_id = ? OR callee_id = ? ORDER BY started_at DESC LIMIT 100').all(req.user.id, req.user.id);
+  res.json({ calls: rows.map((c) => {
+    const otherId = c.caller_id === req.user.id ? c.callee_id : c.caller_id;
+    const o = q.userById.get(otherId);
+    return { id: c.id, kind: c.kind, outgoing: c.caller_id === req.user.id, status: c.status, startedAt: c.started_at,
+      duration: c.answered_at && c.ended_at ? Math.round((c.ended_at - c.answered_at) / 1000) : 0, user: o ? publicUser(o) : null };
+  }) });
+});
+const liveCalls = new Map(); // callId -> {caller, callee}
+function callAllowed(a, b) { return a !== b && !!q.chatByDirectKey.get([a, b].sort((x, y) => x - y).join(':')); }
+function finishCall(callId, status) {
+  const c = db.prepare('SELECT * FROM calls WHERE id = ?').get(callId);
+  liveCalls.delete(callId);
+  if (!c || c.ended_at) return;
+  const final = c.answered_at ? 'ended' : status;
+  db.prepare('UPDATE calls SET ended_at = ?, status = ? WHERE id = ?').run(now(), final, callId);
+  const chatId = q.chatByDirectKey.get([c.caller_id, c.callee_id].sort((x, y) => x - y).join(':'))?.id;
+  if (!chatId) return;
+  const duration = c.answered_at ? Math.round((now() - c.answered_at) / 1000) : 0;
+  const info = q.insertMessage.run(chatId, c.caller_id, 'call', JSON.stringify({ kind: c.kind, status: final, duration }), now());
+  const msg = messageView(q.messageById.get(info.lastInsertRowid));
+  for (const { user_id } of q.memberIds.all(chatId)) { sendTo(user_id, { type: 'message', message: msg }); sendTo(user_id, { type: 'callsChanged' }); }
+}
+function handleCallSignal(user, m) {
+  const to = Number(m.to);
+  const callId = String(m.callId || '').slice(0, 40);
+  if (!/^[a-z0-9-]{8,40}$/i.test(callId) || !callAllowed(user.id, to)) return;
+  const action = String(m.action || '');
+  if (!['offer', 'answer', 'ice', 'end', 'reject', 'busy', 'ringing', 'renegotiate', 'renegotiate-answer'].includes(action)) return;
+  if (action === 'offer') {
+    if (db.prepare('SELECT 1 FROM calls WHERE id = ?').get(callId)) return;
+    const kind = m.kind === 'video' ? 'video' : 'audio';
+    db.prepare('INSERT INTO calls (id, caller_id, callee_id, kind, started_at) VALUES (?, ?, ?, ?, ?)').run(callId, user.id, to, kind, now());
+    liveCalls.set(callId, { caller: user.id, callee: to });
+    if (!online.has(to)) { setTimeout(() => finishCall(callId, 'missed'), 100); sendTo(user.id, { type: 'call', from: to, callId, action: 'unavailable' }); return; }
+  } else {
+    const live = liveCalls.get(callId);
+    if (!live || ![live.caller, live.callee].includes(user.id) || ![live.caller, live.callee].includes(to)) return;
+    if (action === 'answer') db.prepare("UPDATE calls SET answered_at = COALESCE(answered_at, ?), status = 'answered' WHERE id = ?").run(now(), callId);
+    if (action === 'end') finishCall(callId, user.id === live.caller ? 'missed' : 'rejected');
+    if (action === 'reject') finishCall(callId, 'rejected');
+    if (action === 'busy') finishCall(callId, 'busy');
+  }
+  const me = q.userById.get(user.id);
+  sendTo(to, { type: 'call', from: user.id, fromUser: publicUser(me), callId, action, kind: m.kind, data: m.data });
+}
+
 /* ---------- Каналы (публикации не шифруются сквозным шифрованием — как в Telegram) ---------- */
 const CH_FILES = path.join(DATA_DIR, 'channel_files');
 fs.mkdirSync(CH_FILES, { recursive: true });
@@ -1302,7 +1371,7 @@ app.get(/^\/(?!api|ws).*/, (req, res) => res.sendFile(path.join(__dirname, 'publ
 
 /* ---------- WebSocket ---------- */
 const server = http.createServer(app);
-const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 96 * 1024 });
 const online = new Map(); // userId -> Set<ws>
 
 function sendTo(userId, data) {
@@ -1330,6 +1399,7 @@ server.on('upgrade', (req, socket, head) => {
     ws.on('pong', () => { ws.isAlive = true; });
     ws.on('message', (raw) => {
       let m; try { m = JSON.parse(raw); } catch { return; }
+      if (m.type === 'call') return handleCallSignal(user, m);
       if (m.type === 'typing' && q.isMember.get(Number(m.chatId), user.id)) {
         for (const { user_id } of q.memberIds.all(Number(m.chatId))) {
           if (user_id !== user.id) sendTo(user_id, { type: 'typing', chatId: Number(m.chatId), userId: user.id });
@@ -1340,7 +1410,14 @@ server.on('upgrade', (req, socket, head) => {
       const set = online.get(user.id);
       if (!set) return;
       set.delete(ws);
-      if (!set.size) { online.delete(user.id); announcePresence(user.id, false); }
+      if (!set.size) {
+        online.delete(user.id); announcePresence(user.id, false);
+        for (const [cid, live] of liveCalls) if (live.caller === user.id || live.callee === user.id) {
+          const other = live.caller === user.id ? live.callee : live.caller;
+          sendTo(other, { type: 'call', from: user.id, callId: cid, action: 'end' });
+          finishCall(cid, live.caller === user.id ? 'missed' : 'rejected');
+        }
+      }
     });
   });
 });
