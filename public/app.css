@@ -836,3 +836,44 @@ mark{background:#FFD34D;color:#141413;border-radius:3px;padding:0 1px}
 .sv-views{flex:1;display:flex;align-items:center;gap:8px;border:0;background:none;color:#fff;font:inherit;cursor:pointer}
 .sv-foot .icon-btn{color:#fff}
 .sv-react{font-size:22px}
+
+/* ---------- v14: групповые звонки ---------- */
+.gcall-bar{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--accent-soft);border-bottom:1px solid var(--chip-border)}
+.gcall-bar .grow{display:flex;flex-direction:column;min-width:0}
+.gcall-bar b{font-size:14px;color:var(--accent)}
+.gcall-bar small{font-size:12px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gcall-bar .btn{height:34px;padding:0 14px;font-size:13px}
+.gcall-live{width:10px;height:10px;border-radius:50%;background:var(--accent);flex:none;animation:gpulse 1.4s ease-in-out infinite}
+@keyframes gpulse{0%,100%{box-shadow:0 0 0 0 rgba(47,217,140,.6)}50%{box-shadow:0 0 0 6px rgba(47,217,140,0)}}
+.gcall-screen{position:fixed;inset:0;z-index:260;background:#07100C;color:#fff;display:flex;flex-direction:column;padding:12px 12px calc(20px + env(safe-area-inset-bottom))}
+.gcall-head{display:flex;align-items:center;gap:10px;padding:4px 4px 12px}
+.gcall-head .grow{display:flex;flex-direction:column;min-width:0}
+.gcall-head small{color:#9FB5AA;font-size:13px}
+.gcall-head .icon-btn{color:#fff}
+.gcall-head .call-e2e{display:flex;align-items:center;gap:4px}
+.gcall-grid{flex:1;min-height:0;display:grid;gap:8px;grid-template-columns:1fr;grid-auto-rows:1fr;margin-bottom:18px}
+.gcall-grid.n2{grid-template-columns:1fr}
+.gcall-grid.n3,.gcall-grid.n4{grid-template-columns:1fr 1fr}
+.gcall-grid.n5,.gcall-grid.n6,.gcall-grid.n7,.gcall-grid.n8,.gcall-grid.n9{grid-template-columns:repeat(3,1fr)}
+@media (min-width:761px){.gcall-grid.n2{grid-template-columns:1fr 1fr}}
+@media (max-width:760px){.gcall-grid.n5,.gcall-grid.n6{grid-template-columns:1fr 1fr}}
+.gtile{position:relative;border-radius:16px;background:#14211B;display:flex;align-items:center;justify-content:center;overflow:hidden;min-height:0;box-shadow:inset 0 0 0 2px transparent;transition:box-shadow .15s}
+.gtile.speaking{box-shadow:inset 0 0 0 3px var(--accent)}
+.gtile video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.gtile.screen video{object-fit:contain;background:#000}
+.gtile video.mirror{transform:scaleX(-1)}
+.gname{position:absolute;left:8px;bottom:8px;display:flex;align-items:center;gap:4px;background:rgba(0,0,0,.5);padding:3px 9px;border-radius:10px;font-size:13px;max-width:calc(100% - 16px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gconn{position:absolute;top:8px;right:8px;font-size:11px;background:rgba(0,0,0,.5);padding:2px 8px;border-radius:8px;color:#C9D8D0}
+.call-btn.glass.active{background:var(--accent);color:#03140B}
+.gcall-screen .call-controls{gap:14px}
+.gcall-pill{position:fixed;top:calc(10px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);z-index:240;display:flex;align-items:center;gap:8px;padding:9px 16px;border-radius:20px;border:0;background:var(--accent);color:var(--on-accent);font:600 14px/1 inherit;box-shadow:0 6px 20px rgba(0,0,0,.3);cursor:pointer;max-width:calc(100vw - 32px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gcall-pill .gcall-live{background:currentColor}
+.gcall-invite{position:fixed;top:calc(12px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);z-index:270;width:min(440px,calc(100vw - 24px));display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:18px;background:var(--surface);border:1px solid var(--chip-border);box-shadow:0 12px 32px rgba(0,0,0,.35)}
+.gcall-invite .grow{display:flex;flex-direction:column;min-width:0}
+.gcall-invite small{color:var(--muted);font-size:12px}
+.gcall-invite .btn{height:36px;padding:0 12px;font-size:13px}
+.composer .field{min-width:0}
+.composer textarea{min-width:0;width:100%}
+.composer>*{flex-shrink:0}
+.composer>.field{flex-shrink:1}
+@media (max-width:420px){.composer{gap:2px;padding:8px 6px}.composer .round-btn{width:38px}}

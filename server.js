@@ -328,6 +328,7 @@ function chatView(chat, userId) {
     members, lastMessage: last ? messageView(last) : null,
     pinned: chat.pinned_id ? (() => { const pm = q.messageById.get(chat.pinned_id); return pm && pm.kind !== 'deleted' ? messageView(pm) : null; })() : null,
     archived: !!chat.archived,
+    groupCall: chat.type === 'group' ? roomView(rooms.get(chat.id)) : null,
     blocked: chat.type === 'direct' ? blockState(userId, members.find((m) => m.id !== userId)?.id) : null,
     unread: chat.unread ?? 0, mentions: chat.mentions ?? 0, lastReadId: chat.last_read_id ?? members.find((m) => m.id === userId)?.lastReadId ?? 0,
   };
@@ -854,6 +855,7 @@ app.post('/api/chats/:id/members', auth, json, (req, res) => {
 app.post('/api/chats/:id/leave', auth, (req, res) => {
   const chat = requireMember(req, res); if (!chat) return;
   if (chat.type !== 'group') return fail(res, 400, 'Из личного чата выйти нельзя');
+  leaveRoom(chat.id, req.user.id);
   q.deleteMember.run(chat.id, req.user.id);
   addSystem(chat.id, `${req.user.display_name} покинул(а) группу`);
   q.deleteEmptyChat.run(chat.id, chat.id);
@@ -1884,6 +1886,70 @@ app.get('/.well-known/assetlinks.json', (req, res) => {
 app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html', maxAge: '1h' }));
 app.get(/^\/(?!api|ws).*/, (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
+/* ---------- Групповые звонки: каждый соединяется с каждым (mesh), сервер только передаёт сигналы ---------- */
+const rooms = new Map(); // chatId -> { id, kind, startedAt, by, maxPeers, peers: Map<userId, {ws, muted, video, screen, joinedAt}> }
+const GC_MAX = 10;
+const peerState = (p) => ({ muted: p.muted, video: p.video, screen: p.screen });
+const roomView = (r) => (r ? { id: r.id, kind: r.kind, startedAt: r.startedAt, count: r.peers.size, peers: [...r.peers.keys()] } : null);
+function roomBroadcast(chatId, data, except) { for (const { user_id } of q.memberIds.all(chatId)) if (user_id !== except) sendTo(user_id, data); }
+const sendWs = (ws, data) => { if (ws?.readyState === 1) ws.send(JSON.stringify(data)); };
+function leaveRoom(chatId, userId) {
+  const r = rooms.get(chatId);
+  if (!r || !r.peers.has(userId)) return;
+  r.peers.delete(userId);
+  for (const p of r.peers.values()) sendWs(p.ws, { type: 'gcall', action: 'peerLeft', chatId, userId });
+  if (!r.peers.size) {
+    rooms.delete(chatId);
+    if (q.chatById.get(chatId)) {
+      const duration = Math.round((now() - r.startedAt) / 1000);
+      const info = q.insertMessage.run(chatId, r.by, 'call', JSON.stringify({ kind: r.kind, status: 'ended', duration, group: true, count: r.maxPeers }), now());
+      const msg = messageView(q.messageById.get(info.lastInsertRowid));
+      roomBroadcast(chatId, { type: 'message', message: msg });
+    }
+  }
+  roomBroadcast(chatId, { type: 'gcall', action: 'room', chatId, room: roomView(rooms.get(chatId)) });
+}
+function handleGroupCall(user, m, ws) {
+  const chatId = Number(m.chatId);
+  const chat = q.chatById.get(chatId);
+  if (!chat || chat.type !== 'group' || !q.isMember.get(chatId, user.id)) return;
+  let r = rooms.get(chatId);
+  if (m.action === 'join') {
+    for (const [cid, other] of rooms) if (cid !== chatId && other.peers.has(user.id)) leaveRoom(cid, user.id);
+    if (r?.peers.has(user.id)) leaveRoom(chatId, user.id), r = rooms.get(chatId);
+    if (r && r.peers.size >= GC_MAX) return sendWs(ws, { type: 'gcall', action: 'full', chatId });
+    const isNew = !r;
+    if (!r) { r = { id: crypto.randomUUID(), kind: m.kind === 'video' ? 'video' : 'audio', startedAt: now(), by: user.id, maxPeers: 0, peers: new Map() }; rooms.set(chatId, r); }
+    const existing = [...r.peers].map(([id, p]) => ({ id, state: peerState(p) }));
+    const me = { ws, muted: !!m.muted, video: !!m.video, screen: false, joinedAt: now() };
+    r.peers.set(user.id, me);
+    r.maxPeers = Math.max(r.maxPeers, r.peers.size);
+    sendWs(ws, { type: 'gcall', action: 'joined', chatId, callId: r.id, startedAt: r.startedAt, kind: r.kind, peers: existing });
+    for (const [id, p] of r.peers) if (id !== user.id) sendWs(p.ws, { type: 'gcall', action: 'peerJoined', chatId, userId: user.id, state: peerState(me) });
+    roomBroadcast(chatId, { type: 'gcall', action: 'room', chatId, room: roomView(r) });
+    if (isNew) {
+      roomBroadcast(chatId, { type: 'gcall', action: 'started', chatId, by: user.id, byName: user.display_name, kind: r.kind }, user.id);
+      for (const { user_id } of q.memberIds.all(chatId)) {
+        if (user_id !== user.id) pushTo(user_id, { title: chat.title, body: `${user.display_name} начал(а) групповой ${r.kind === 'video' ? 'видеозвонок' : 'звонок'}`, tag: 'gcall-' + chatId, url: '/', chatId, urgent: true });
+      }
+    }
+    return;
+  }
+  if (!r || r.peers.get(user.id)?.ws !== ws) return;
+  if (m.action === 'leave') return leaveRoom(chatId, user.id);
+  if (m.action === 'signal') {
+    const to = r.peers.get(Number(m.to));
+    const data = m.data && typeof m.data === 'object' ? m.data : null;
+    if (to && data && JSON.stringify(data).length < 60000) sendWs(to.ws, { type: 'gcall', action: 'signal', chatId, from: user.id, data });
+    return;
+  }
+  if (m.action === 'state') {
+    const me = r.peers.get(user.id);
+    Object.assign(me, { muted: !!m.muted, video: !!m.video, screen: !!m.screen });
+    for (const [id, p] of r.peers) if (id !== user.id) sendWs(p.ws, { type: 'gcall', action: 'state', chatId, userId: user.id, state: peerState(me) });
+  }
+}
+
 /* ---------- WebSocket ---------- */
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true, maxPayload: 96 * 1024 });
@@ -1916,6 +1982,7 @@ server.on('upgrade', (req, socket, head) => {
     ws.on('message', (raw) => {
       let m; try { m = JSON.parse(raw); } catch { return; }
       if (m.type === 'call') return handleCallSignal(user, m);
+      if (m.type === 'gcall') return handleGroupCall(user, m, ws);
       if (m.type === 'typing' && q.isMember.get(Number(m.chatId), user.id)) {
         for (const { user_id } of q.memberIds.all(Number(m.chatId))) {
           if (user_id !== user.id) sendTo(user_id, { type: 'typing', chatId: Number(m.chatId), userId: user.id });
@@ -1923,6 +1990,7 @@ server.on('upgrade', (req, socket, head) => {
       }
     });
     ws.on('close', () => {
+      for (const [cid, r] of rooms) if (r.peers.get(user.id)?.ws === ws) leaveRoom(cid, user.id);
       const set = online.get(user.id);
       if (!set) return;
       set.delete(ws);

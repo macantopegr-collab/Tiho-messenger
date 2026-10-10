@@ -74,6 +74,8 @@
     chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>',
     circleVideo: '<circle cx="12" cy="12" r="9"/><path d="M10 9v6l5-3Z" fill="currentColor"/>',
     flip: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"/><path d="M9.5 13.5a2.5 2.5 0 0 0 4.6 1.3M14.5 12.5a2.5 2.5 0 0 0-4.6-1.3M14.5 15.5v-2h-2M9.5 10.5v2h2"/>',
+    screen: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4M12 13V7m-3 3 3-3 3 3"/>',
+    minimize: '<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/>',
     flag: '<path d="M5 21V4h11l-1.5 4L16 12H5"/>',
     block: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
     devices: '<rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M6 18h6"/><rect x="17" y="8" width="5" height="12" rx="1.2"/>',
@@ -279,7 +281,7 @@
     if (p.t === 'system') return p.text;
     if (p.t === 'deleted') return 'Сообщение удалено';
     if (p.t === 'poll') return '📊 ' + p.question;
-    if (p.t === 'call') return (p.status === 'ended' ? '📞 ' : '📵 ') + (p.kind === 'video' ? 'Видеозвонок' : 'Звонок');
+    if (p.t === 'call') return p.group ? '📞 Групповой звонок' : (p.status === 'ended' ? '📞 ' : '📵 ') + (p.kind === 'video' ? 'Видеозвонок' : 'Звонок');
     if (p.t === 'sticker') return 'Стикер «' + TihoStickers.nameOf(p.pack, p.id) + '»';
     if (p.t === 'gift') return '🎁 ' + ((S.catalog?.gifts || []).find((x) => x.id === p.type)?.name ? `Подарок «${S.catalog.gifts.find((x) => x.id === p.type).name}»` : 'Подарок');
     return p.reason === 'before' ? 'Сообщение до вашего вступления' : 'Не удалось расшифровать';
@@ -1258,10 +1260,19 @@
         h('b', null, chatTitle(chat)), h('small', { class: st.cls }, st.cls === 'typing' ? dots() : null, st.text)),
       chat.type === 'direct' && !saved && !chat.blocked ? h('button', { class: 'icon-btn', 'aria-label': 'Аудиозвонок', title: 'Аудиозвонок', onclick: () => startCall(other(chat), 'audio') }, icon('phone', 21, 1.8)) : null,
       chat.type === 'direct' && !saved && !chat.blocked ? h('button', { class: 'icon-btn', 'aria-label': 'Видеозвонок', title: 'Видеозвонок', onclick: () => startCall(other(chat), 'video') }, icon('video', 22, 1.8)) : null,
-      h('button', { class: 'icon-btn' + (chat.type === 'direct' && !saved ? ' hide-sm' : ''), 'aria-label': 'Поиск по сообщениям', title: 'Поиск', onclick: openSearch }, icon('search', 22, 1.8)),
+      chat.type === 'group' ? h('button', { class: 'icon-btn', 'aria-label': 'Групповой звонок', title: 'Групповой звонок', onclick: () => joinGroupCall(chat, 'audio') }, icon('phone', 21, 1.8)) : null,
+      chat.type === 'group' ? h('button', { class: 'icon-btn hide-sm', 'aria-label': 'Групповой видеозвонок', title: 'Видеозвонок', onclick: () => joinGroupCall(chat, 'video') }, icon('video', 22, 1.8)) : null,
+      h('button', { class: 'icon-btn' + (!saved ? ' hide-sm' : ''), 'aria-label': 'Поиск по сообщениям', title: 'Поиск', onclick: openSearch }, icon('search', 22, 1.8)),
       saved ? null : h('button', { class: 'icon-btn hide-sm', 'aria-label': 'Код безопасности', title: 'Код безопасности', onclick: () => openInfo(chat.id) }, icon('shield', 22, 1.8)),
       saved ? null : h('button', { class: 'icon-btn', 'aria-label': chat.type === 'group' ? 'О группе' : 'Профиль собеседника', onclick: () => openChatPage(chat) }, icon('more', 22))].filter(Boolean));
     const warn = clear(S.refs.keyWarnBox);
+    if (chat.groupCall && S.gcall?.chatId !== chat.id) {
+      const n = chat.groupCall.count;
+      warn.append(h('div', { class: 'gcall-bar' }, h('span', { class: 'gcall-live' }),
+        h('span', { class: 'grow' }, h('b', null, chat.groupCall.kind === 'video' ? 'Идёт видеозвонок' : 'Идёт групповой звонок'),
+          h('small', null, `${n} ${plural(n, 'участник', 'участника', 'участников')}: ${chat.groupCall.peers.map((id) => memberOf(chat, id)?.displayName.split(' ')[0]).filter(Boolean).join(', ')}`)),
+        h('button', { class: 'btn', onclick: () => joinGroupCall(chat, chat.groupCall.kind) }, 'Присоединиться')));
+    }
     const changed = chat.members.filter((m) => m.id !== S.me.id && keyChanged(m));
     if (changed.length) {
       warn.append(h('div', { class: 'key-warn', role: 'alert' }, icon('warn', 20),
@@ -2160,6 +2171,7 @@
       return;
     }
     if (d.type === 'call') return onCallSignal(d);
+    if (d.type === 'gcall') return onGroupCall(d);
     if (d.type === 'callsChanged') { if (S.tab === 'calls') renderCalls(); return; }
     if (d.type === 'channelPost') {
       const c = S.channels.get(d.channelId);
@@ -2725,7 +2737,7 @@
     return navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: video ? { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } : false });
   }
   async function startCall(user, kind) {
-    if (CALL.cur) return toast('Уже идёт звонок');
+    if (CALL.cur || S.gcall) return toast('Уже идёт звонок');
     if (!window.RTCPeerConnection || !navigator.mediaDevices?.getUserMedia) return toast('Браузер не поддерживает звонки');
     let stream;
     try { stream = await getMedia(kind === 'video'); }
@@ -2748,7 +2760,7 @@
   async function onCallSignal(d) {
     const c = CALL.cur;
     if (d.action === 'offer') {
-      if (c) { wsSend({ type: 'call', to: d.from, callId: d.callId, action: 'busy' }); return; }
+      if (c || S.gcall) { wsSend({ type: 'call', to: d.from, callId: d.callId, action: 'busy' }); return; }
       const user = d.fromUser || freshUser(d.from) || { id: d.from, displayName: 'Собеседник' };
       CALL.cur = { id: d.callId, peerId: d.from, user, kind: d.kind === 'video' ? 'video' : 'audio', outgoing: false, state: 'incoming', offer: d.data?.sdp, queue: [], muted: false, camOff: false };
       wsSend({ type: 'call', to: d.from, callId: d.callId, action: 'ringing' });
@@ -2852,6 +2864,257 @@
     attachMedia();
   }
 
+  /* ================= ГРУППОВЫЕ ЗВОНКИ ================= */
+  const gsig = (to, data) => S.gcall && wsSend({ type: 'gcall', action: 'signal', chatId: S.gcall.chatId, to, data });
+  const gstate = () => { const g = S.gcall; if (g) wsSend({ type: 'gcall', action: 'state', chatId: g.chatId, muted: g.muted, video: !!g.camOn && !g.screenTrack, screen: !!g.screenTrack }); };
+  async function joinGroupCall(chat, kind) {
+    if (S.gcall?.chatId === chat.id) { S.gcall.minimized = false; return drawGroupCall(); }
+    if (CALL.cur || S.gcall) return toast('Уже идёт звонок');
+    if (!window.RTCPeerConnection || !navigator.mediaDevices?.getUserMedia) return toast('Браузер не поддерживает звонки');
+    if (chat.groupCall) kind = chat.groupCall.kind;
+    let local, camOn = false;
+    try {
+      local = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true },
+        video: kind === 'video' ? { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } : false });
+      camOn = kind === 'video';
+    } catch {
+      try { local = await navigator.mediaDevices.getUserMedia({ audio: true }); if (kind === 'video') toast('Камера недоступна — вы в звонке со звуком'); }
+      catch { return toast('Нет доступа к микрофону'); }
+    }
+    await getIce();
+    document.querySelector('.gcall-invite')?.remove(); ringtone(false);
+    S.gcall = { chatId: chat.id, kind, local, camTrack: local.getVideoTracks()[0] || null, camOn, muted: false, screenTrack: null,
+      peers: new Map(), startedAt: Date.now(), minimized: false, audioBox: h('div', { class: 'sr', 'aria-hidden': 'true' }) };
+    document.body.append(S.gcall.audioBox);
+    S.gcall.levelIv = setInterval(updateLevels, 250);
+    wsSend({ type: 'gcall', action: 'join', chatId: chat.id, kind, video: camOn, muted: false });
+    drawGroupCall(); renderHead();
+  }
+  function outgoingVideo() { const g = S.gcall; return g.screenTrack || (g.camOn ? g.camTrack : null); }
+  function createPeer(id, state) {
+    const g = S.gcall;
+    if (g.peers.has(id)) return g.peers.get(id);
+    const pc = new RTCPeerConnection({ iceServers: S.iceServers });
+    const peer = { id, pc, stream: new MediaStream(), state: state || {}, polite: S.me.id < id, makingOffer: false, ignoreOffer: false, videoSender: null };
+    g.peers.set(id, peer);
+    const au = g.local.getAudioTracks()[0];
+    if (au) pc.addTrack(au, g.local);
+    const v = outgoingVideo();
+    if (v) peer.videoSender = pc.addTrack(v, g.local);
+    pc.onnegotiationneeded = async () => {
+      try { peer.makingOffer = true; await pc.setLocalDescription(); gsig(id, { description: pc.localDescription.toJSON() }); }
+      catch { /* повторим при следующем изменении */ } finally { peer.makingOffer = false; }
+    };
+    pc.onicecandidate = (e) => { if (e.candidate) gsig(id, { candidate: e.candidate.toJSON() }); };
+    pc.ontrack = (e) => {
+      if (!peer.stream.getTracks().includes(e.track)) peer.stream.addTrack(e.track);
+      e.track.onunmute = () => drawGroupCall();
+      e.track.onended = () => drawGroupCall();
+      if (e.track.kind === 'audio') {
+        if (!peer.audio) { peer.audio = h('audio', { autoplay: true }); g.audioBox.append(peer.audio); }
+        peer.audio.srcObject = new MediaStream([e.track]); peer.audio.play?.().catch(() => {});
+        try {
+          S.levelAc = S.levelAc || new AudioContext();
+          const an = S.levelAc.createAnalyser(); an.fftSize = 256;
+          S.levelAc.createMediaStreamSource(new MediaStream([e.track])).connect(an);
+          peer.analyser = an;
+        } catch { /* без индикатора речи */ }
+      }
+      drawGroupCall();
+    };
+    pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed') pc.restartIce?.(); drawGroupCall(); };
+    return peer;
+  }
+  async function onGroupSignal(from, data) {
+    const g = S.gcall;
+    if (!g) return;
+    const peer = g.peers.get(from) || createPeer(from);
+    const pc = peer.pc;
+    try {
+      if (data.description) {
+        const collision = data.description.type === 'offer' && (peer.makingOffer || pc.signalingState !== 'stable');
+        peer.ignoreOffer = !peer.polite && collision;
+        if (peer.ignoreOffer) return;
+        await pc.setRemoteDescription(data.description);
+        if (data.description.type === 'offer') { await pc.setLocalDescription(); gsig(from, { description: pc.localDescription.toJSON() }); }
+      } else if (data.candidate) {
+        try { await pc.addIceCandidate(data.candidate); } catch (e) { if (!peer.ignoreOffer) throw e; }
+      }
+    } catch { /* сбой согласования — попробуем снова при следующем сигнале */ }
+  }
+  function dropPeer(id) {
+    const g = S.gcall, peer = g?.peers.get(id);
+    if (!peer) return;
+    try { peer.pc.close(); } catch { /* уже */ }
+    peer.audio?.remove();
+    g.peers.delete(id);
+  }
+  async function onGroupCall(d) {
+    const chat = S.chats.get(d.chatId);
+    const g = S.gcall?.chatId === d.chatId ? S.gcall : null;
+    switch (d.action) {
+      case 'room':
+        if (chat) { chat.groupCall = d.room; if (S.active === chat.id) renderHead(); renderList(); }
+        if (g) drawGroupCall();
+        break;
+      case 'started':
+        if (!chat || S.gcall) break;
+        showCallInvite(chat, d);
+        break;
+      case 'joined':
+        if (!g) break;
+        g.startedAt = d.startedAt; g.kind = d.kind;
+        for (const p of d.peers) createPeer(p.id, p.state);
+        drawGroupCall();
+        break;
+      case 'peerJoined':
+        if (!g) break;
+        createPeer(d.userId, d.state); beep(); drawGroupCall();
+        break;
+      case 'peerLeft':
+        if (!g) break;
+        dropPeer(d.userId); drawGroupCall();
+        break;
+      case 'signal': if (g) await onGroupSignal(d.from, d.data); break;
+      case 'state': { const peer = g?.peers.get(d.userId); if (peer) { peer.state = d.state; drawGroupCall(); } break; }
+      case 'full': if (g) { leaveGroupCall(true); toast('В звонке уже максимум участников'); } break;
+      default: break;
+    }
+  }
+  function showCallInvite(chat, d) {
+    document.querySelector('.gcall-invite')?.remove();
+    const close = () => { el.remove(); ringtone(false); };
+    const el = h('div', { class: 'gcall-invite', role: 'alertdialog', 'aria-label': 'Групповой звонок' }, avatar(chat, 44),
+      h('span', { class: 'grow' }, h('b', null, chat.title), h('small', null, `${d.byName} начал(а) ${d.kind === 'video' ? 'видеозвонок' : 'звонок'}`)),
+      h('button', { class: 'icon-btn', 'aria-label': 'Скрыть', onclick: close }, icon('close', 20)),
+      h('button', { class: 'btn', onclick: () => { close(); openChat(chat.id); joinGroupCall(chat, d.kind); } }, 'Присоединиться'));
+    document.body.append(el);
+    ringtone(true, false);
+    setTimeout(() => ringtone(false), 4500);
+    setTimeout(() => { if (el.isConnected) close(); }, 30000);
+  }
+  async function setOutgoingVideo(track) {
+    const g = S.gcall;
+    for (const peer of g.peers.values()) {
+      if (peer.videoSender) await peer.videoSender.replaceTrack(track).catch(() => {});
+      else if (track) peer.videoSender = peer.pc.addTrack(track, g.local);
+    }
+  }
+  async function toggleGroupCam() {
+    const g = S.gcall;
+    if (!g.camTrack) {
+      try { const st = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } }); g.camTrack = st.getVideoTracks()[0]; }
+      catch { return toast('Нет доступа к камере'); }
+    }
+    g.camOn = !g.camOn;
+    g.camTrack.enabled = g.camOn;
+    if (!g.screenTrack) await setOutgoingVideo(g.camOn ? g.camTrack : null);
+    gstate(); drawGroupCall();
+  }
+  async function toggleScreen() {
+    const g = S.gcall;
+    if (g.screenTrack) { stopScreen(); return; }
+    if (!navigator.mediaDevices?.getDisplayMedia) return toast('Показ экрана не поддерживается в этом браузере');
+    try {
+      const st = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false });
+      g.screenTrack = st.getVideoTracks()[0];
+      g.screenTrack.onended = () => { if (S.gcall === g && g.screenTrack) stopScreen(); };
+      await setOutgoingVideo(g.screenTrack);
+      gstate(); drawGroupCall();
+    } catch { /* отменили выбор экрана */ }
+  }
+  async function stopScreen() {
+    const g = S.gcall;
+    const t = g.screenTrack; g.screenTrack = null;
+    t?.stop();
+    await setOutgoingVideo(g.camOn ? g.camTrack : null);
+    gstate(); drawGroupCall();
+  }
+  function leaveGroupCall(silent) {
+    const g = S.gcall;
+    if (!g) return;
+    if (!silent) wsSend({ type: 'gcall', action: 'leave', chatId: g.chatId });
+    for (const id of [...g.peers.keys()]) dropPeer(id);
+    g.local.getTracks().forEach((t) => t.stop()); g.camTrack?.stop(); g.screenTrack?.stop();
+    clearInterval(g.levelIv); clearInterval(g.tick);
+    g.audioBox.remove();
+    document.querySelector('.gcall-screen')?.remove(); document.querySelector('.gcall-pill')?.remove();
+    S.gcall = null;
+    if (S.active === g.chatId) renderHead();
+  }
+  function updateLevels() {
+    const g = S.gcall;
+    if (!g) return;
+    const buf = new Uint8Array(128);
+    for (const peer of g.peers.values()) {
+      let lvl = 0;
+      if (peer.analyser && !peer.state.muted) { peer.analyser.getByteTimeDomainData(buf); for (const v of buf) lvl = Math.max(lvl, Math.abs(v - 128)); }
+      document.querySelector(`.gtile[data-id="${peer.id}"]`)?.classList.toggle('speaking', lvl > 10);
+    }
+  }
+  function tileVideo(holder, track, mirror) {
+    holder.vids = holder.vids || {};
+    let v = holder.vids[track.id];
+    if (!v) {
+      v = h('video', { autoplay: true, playsinline: true });
+      v.muted = true; v.srcObject = new MediaStream([track]); holder.vids[track.id] = v;
+    }
+    v.classList.toggle('mirror', !!mirror);
+    return v;
+  }
+  function drawGroupCall() {
+    const g = S.gcall;
+    if (!g) return;
+    const chat = S.chats.get(g.chatId);
+    let scr = document.querySelector('.gcall-screen');
+    document.querySelector('.gcall-pill')?.remove();
+    if (g.minimized) {
+      scr?.remove();
+      document.body.append(h('button', { class: 'gcall-pill', onclick: () => { g.minimized = false; drawGroupCall(); } },
+        h('span', { class: 'gcall-live' }), `Звонок · ${chat?.title || ''} · ${g.peers.size + 1}`));
+      return;
+    }
+    if (!scr) {
+      scr = h('div', { class: 'gcall-screen', role: 'dialog', 'aria-label': 'Групповой звонок' });
+      document.body.append(scr);
+      clearInterval(g.tick);
+      g.tick = setInterval(() => { const t = document.getElementById('gcall-time'); if (t) t.textContent = fmtDur(Math.floor((Date.now() - g.startedAt) / 1000)); }, 1000);
+    }
+    const tiles = [];
+    const myVideo = outgoingVideo();
+    const meTile = h('div', { class: 'gtile me', 'data-id': S.me.id },
+      myVideo ? tileVideo(g, myVideo, !g.screenTrack) : userAvatar(S.me, 72),
+      h('span', { class: 'gname' }, g.muted ? icon('micOff', 14, 2) : null, g.screenTrack ? 'Вы · экран' : 'Вы'));
+    tiles.push(meTile);
+    for (const peer of g.peers.values()) {
+      const u = chat && memberOf(chat, peer.id) || { id: peer.id, displayName: 'Участник', color: 7 };
+      const vt = peer.stream.getVideoTracks().find((t) => t.readyState === 'live' && !t.muted);
+      const showV = vt && (peer.state.video || peer.state.screen);
+      const connecting = !['connected', 'completed'].includes(peer.pc.connectionState) && peer.pc.iceConnectionState !== 'connected';
+      tiles.push(h('div', { class: 'gtile' + (peer.state.screen ? ' screen' : ''), 'data-id': peer.id },
+        showV ? tileVideo(peer, vt) : userAvatar(u, 72),
+        h('span', { class: 'gname' }, peer.state.muted ? icon('micOff', 14, 2) : null, u.displayName + (peer.state.screen ? ' · экран' : '')),
+        connecting ? h('span', { class: 'gconn' }, 'соединение…') : null));
+    }
+    const btn = (cls, ic, label, fn, pressed) => h('div', { class: 'call-btn-wrap' },
+      h('button', { class: 'call-btn ' + cls, 'aria-label': label, 'aria-pressed': pressed === undefined ? null : String(pressed), onclick: fn }, icon(ic, 24, 2)), h('span', null, label));
+    const n = g.peers.size + 1;
+    clear(scr).append(
+      h('header', { class: 'gcall-head' },
+        h('button', { class: 'icon-btn', 'aria-label': 'Свернуть звонок', onclick: () => { g.minimized = true; drawGroupCall(); } }, icon('minimize', 22, 2)),
+        h('div', { class: 'grow' }, h('b', null, chat?.title || 'Звонок'),
+          h('small', null, `${n} ${plural(n, 'участник', 'участника', 'участников')} · `, h('span', { id: 'gcall-time' }, fmtDur(Math.floor((Date.now() - g.startedAt) / 1000))))),
+        h('small', { class: 'call-e2e' }, icon('lock', 13), 'шифруется')),
+      h('div', { class: 'gcall-grid n' + Math.min(n, 9) }, tiles),
+      h('div', { class: 'call-controls' },
+        btn('glass' + (g.muted ? ' on' : ''), g.muted ? 'micOff' : 'mic', g.muted ? 'Включить микрофон' : 'Микрофон', () => {
+          g.muted = !g.muted; g.local.getAudioTracks().forEach((t) => { t.enabled = !g.muted; }); gstate(); drawGroupCall(); }, g.muted),
+        btn('glass' + (g.camOn ? '' : ' on'), g.camOn ? 'video' : 'videoOff', g.camOn ? 'Камера' : 'Включить камеру', toggleGroupCam, !g.camOn),
+        navigator.mediaDevices?.getDisplayMedia && !COARSE ? btn('glass' + (g.screenTrack ? ' active' : ''), 'screen', g.screenTrack ? 'Остановить показ' : 'Экран', toggleScreen, !!g.screenTrack) : null,
+        btn('red', 'phoneOff', 'Выйти', () => leaveGroupCall())));
+    scr.querySelectorAll('video').forEach((v) => { if (v.paused) v.play().catch(() => {}); });
+  }
+
   /* История звонков — вкладка «Звонки» */
   let callFilter = 'all';
   async function renderCalls() {
@@ -2885,6 +3148,11 @@
     }
   }
   function callPill(m, p, chat) {
+    if (p.group) {
+      return h('div', { class: 'call-pill' }, icon(p.kind === 'video' ? 'video' : 'group', 15, 2),
+        h('span', null, `Групповой ${p.kind === 'video' ? 'видеозвонок' : 'звонок'} · ${fmtDur(p.duration || 0)}${p.count ? ` · ${p.count} ${plural(p.count, 'участник', 'участника', 'участников')}` : ''}`),
+        h('span', { class: 'muted' }, hm(m.createdAt)));
+    }
     const mine = m.senderId === S.me.id;
     const bad = !mine && p.status !== 'ended';
     const label = p.status === 'ended'
