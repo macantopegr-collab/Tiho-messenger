@@ -873,6 +873,219 @@ app.get('/api/files/:id', auth, (req, res) => {
   fs.createReadStream(path.join(FILES_DIR, id)).pipe(res);
 });
 
+/* ---------- Каналы (публикации не шифруются сквозным шифрованием — как в Telegram) ---------- */
+const CH_FILES = path.join(DATA_DIR, 'channel_files');
+fs.mkdirSync(CH_FILES, { recursive: true });
+db.exec(`CREATE TABLE IF NOT EXISTS channels (
+  id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE COLLATE NOCASE, title TEXT NOT NULL, about TEXT NOT NULL DEFAULT '',
+  owner_id INTEGER NOT NULL REFERENCES users(id), color INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS channel_subs (
+  channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'sub', last_read_id INTEGER NOT NULL DEFAULT 0, joined_at INTEGER NOT NULL, PRIMARY KEY (channel_id, user_id));
+CREATE TABLE IF NOT EXISTS channel_posts (
+  id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE, author_id INTEGER NOT NULL REFERENCES users(id),
+  body TEXT NOT NULL, created_at INTEGER NOT NULL, edited_at INTEGER);
+CREATE INDEX IF NOT EXISTS idx_cposts ON channel_posts(channel_id, id);
+CREATE TABLE IF NOT EXISTS channel_views (post_id INTEGER NOT NULL REFERENCES channel_posts(id) ON DELETE CASCADE, user_id INTEGER NOT NULL, PRIMARY KEY (post_id, user_id));
+CREATE TABLE IF NOT EXISTS channel_reactions (post_id INTEGER NOT NULL REFERENCES channel_posts(id) ON DELETE CASCADE, user_id INTEGER NOT NULL, emoji TEXT NOT NULL, PRIMARY KEY (post_id, user_id));
+CREATE TABLE IF NOT EXISTS channel_files (id TEXT PRIMARY KEY, channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE, mime TEXT NOT NULL, size INTEGER NOT NULL);`);
+const cq = {
+  byId: db.prepare('SELECT * FROM channels WHERE id = ?'),
+  bySlug: db.prepare('SELECT * FROM channels WHERE slug = ?'),
+  insert: db.prepare('INSERT INTO channels (slug, title, about, owner_id, color, created_at) VALUES (?, ?, ?, ?, ?, ?)'),
+  sub: db.prepare('SELECT * FROM channel_subs WHERE channel_id = ? AND user_id = ?'),
+  addSub: db.prepare("INSERT OR IGNORE INTO channel_subs (channel_id, user_id, role, joined_at, last_read_id) VALUES (?, ?, ?, ?, ?)"),
+  delSub: db.prepare('DELETE FROM channel_subs WHERE channel_id = ? AND user_id = ?'),
+  subCount: db.prepare('SELECT COUNT(*) AS n FROM channel_subs WHERE channel_id = ?'),
+  subIds: db.prepare('SELECT user_id FROM channel_subs WHERE channel_id = ?'),
+  mine: db.prepare(`SELECT c.*, s.role, s.last_read_id,
+      (SELECT MAX(id) FROM channel_posts WHERE channel_id = c.id) AS last_id,
+      (SELECT COUNT(*) FROM channel_posts WHERE channel_id = c.id AND id > s.last_read_id AND author_id != s.user_id) AS unread
+    FROM channel_subs s JOIN channels c ON c.id = s.channel_id WHERE s.user_id = ?`),
+  search: db.prepare(`SELECT * FROM channels WHERE (title LIKE ? ESCAPE '\\' OR slug LIKE ? ESCAPE '\\') ORDER BY
+      (SELECT COUNT(*) FROM channel_subs WHERE channel_id = channels.id) DESC LIMIT 20`),
+  post: db.prepare('SELECT * FROM channel_posts WHERE id = ?'),
+  postsBefore: db.prepare('SELECT * FROM channel_posts WHERE channel_id = ? AND id < ? ORDER BY id DESC LIMIT ?'),
+  addPost: db.prepare('INSERT INTO channel_posts (channel_id, author_id, body, created_at) VALUES (?, ?, ?, ?)'),
+  editPost: db.prepare('UPDATE channel_posts SET body = ?, edited_at = ? WHERE id = ?'),
+  delPost: db.prepare('DELETE FROM channel_posts WHERE id = ?'),
+  view: db.prepare('INSERT OR IGNORE INTO channel_views (post_id, user_id) VALUES (?, ?)'),
+  views: db.prepare('SELECT COUNT(*) AS n FROM channel_views WHERE post_id = ?'),
+  setRead: db.prepare('UPDATE channel_subs SET last_read_id = MAX(last_read_id, ?) WHERE channel_id = ? AND user_id = ?'),
+};
+const SLUG_RE = /^[a-zA-Z][a-zA-Z0-9_]{3,31}$/;
+function postView(p, userId) {
+  const author = q.userById.get(p.author_id);
+  const rx = db.prepare('SELECT emoji, user_id FROM channel_reactions WHERE post_id = ? ORDER BY rowid').all(p.id);
+  const map = new Map();
+  for (const r of rx) { if (!map.has(r.emoji)) map.set(r.emoji, []); map.get(r.emoji).push(r.user_id); }
+  return { id: p.id, channelId: p.channel_id, author: author ? { id: author.id, displayName: author.display_name } : null,
+    body: JSON.parse(p.body), createdAt: p.created_at, editedAt: p.edited_at || null, views: cq.views.get(p.id).n,
+    reactions: [...map].map(([emoji, users]) => ({ emoji, count: users.length, mine: users.includes(userId) })) };
+}
+function channelView(c, userId) {
+  const sub = cq.sub.get(c.id, userId);
+  const lastId = c.last_id ?? db.prepare('SELECT MAX(id) AS m FROM channel_posts WHERE channel_id = ?').get(c.id).m;
+  const last = lastId ? cq.post.get(lastId) : null;
+  return { id: c.id, slug: c.slug, title: c.title, about: c.about, color: c.color, createdAt: c.created_at,
+    subscribers: cq.subCount.get(c.id).n, role: sub?.role || null, subscribed: !!sub,
+    unread: c.unread ?? 0, lastPost: last ? postView(last, userId) : null };
+}
+function canPost(channelId, userId) { const s = cq.sub.get(channelId, userId); return s && (s.role === 'owner' || s.role === 'admin'); }
+function chBroadcast(channelId, data) { for (const { user_id } of cq.subIds.all(channelId)) sendTo(user_id, data); }
+function chGet(req, res) {
+  const c = cq.byId.get(Number(req.params.id));
+  if (!c) { fail(res, 404, 'Канал не найден'); return null; }
+  return c;
+}
+function cleanPost(b) {
+  const text = String(b?.text || '').replace(/\u0000/g, '').slice(0, 8000).trim();
+  let image = null;
+  if (b?.image && /^[a-f0-9]{32}$/.test(String(b.image.id || ''))) image = { id: b.image.id, w: Number(b.image.w) || 0, h: Number(b.image.h) || 0 };
+  return { text, image };
+}
+
+app.post('/api/channels', auth, json, (req, res) => {
+  const title = cleanName(req.body?.title);
+  const slug = String(req.body?.slug || '').trim().replace(/^@/, '');
+  if (!title) return fail(res, 400, 'Укажите название канала');
+  if (!SLUG_RE.test(slug)) return fail(res, 400, 'Адрес: 4–32 символа, латиница, цифры и _, начинается с буквы');
+  if (cq.bySlug.get(slug)) return fail(res, 409, 'Этот адрес уже занят');
+  const about = String(req.body?.about || '').slice(0, 400).trim();
+  const id = cq.insert.run(slug, title, about, req.user.id, crypto.randomInt(0, 8), now()).lastInsertRowid;
+  cq.addSub.run(id, req.user.id, 'owner', now(), 0);
+  res.json({ channel: channelView(cq.byId.get(id), req.user.id) });
+});
+app.get('/api/channels', auth, (req, res) => res.json({ channels: cq.mine.all(req.user.id).map((c) => channelView(c, req.user.id)) }));
+app.get('/api/channels/search', auth, (req, res) => {
+  const s = String(req.query.q || '').trim().replace(/^@/, '');
+  if (s.length < 2) return res.json({ channels: [] });
+  const like = '%' + s.replace(/[\\%_]/g, (x) => '\\' + x) + '%';
+  res.json({ channels: cq.search.all(like, like).map((c) => channelView(c, req.user.id)) });
+});
+app.get('/api/channels/by-slug/:slug', auth, (req, res) => {
+  const c = cq.bySlug.get(String(req.params.slug));
+  if (!c) return fail(res, 404, 'Канал не найден');
+  res.json({ channel: channelView(c, req.user.id) });
+});
+app.patch('/api/channels/:id', auth, json, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  if (c.owner_id !== req.user.id) return fail(res, 403, 'Менять канал может только владелец');
+  const title = req.body?.title !== undefined ? cleanName(req.body.title) : c.title;
+  const about = req.body?.about !== undefined ? String(req.body.about).slice(0, 400).trim() : c.about;
+  if (!title) return fail(res, 400, 'Название не может быть пустым');
+  db.prepare('UPDATE channels SET title = ?, about = ? WHERE id = ?').run(title, about, c.id);
+  const v = channelView(cq.byId.get(c.id), req.user.id);
+  chBroadcast(c.id, { type: 'channel', channelId: c.id });
+  res.json({ channel: v });
+});
+app.post('/api/channels/:id/join', auth, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  const last = db.prepare('SELECT MAX(id) AS m FROM channel_posts WHERE channel_id = ?').get(c.id).m || 0;
+  cq.addSub.run(c.id, req.user.id, 'sub', now(), last);
+  res.json({ channel: channelView(cq.byId.get(c.id), req.user.id) });
+});
+app.post('/api/channels/:id/leave', auth, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  if (c.owner_id === req.user.id) return fail(res, 400, 'Владелец не может отписаться. Удалите канал или передайте его.');
+  cq.delSub.run(c.id, req.user.id);
+  res.json({ ok: true });
+});
+app.delete('/api/channels/:id', auth, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  if (c.owner_id !== req.user.id) return fail(res, 403, 'Удалить канал может только владелец');
+  const subs = cq.subIds.all(c.id);
+  for (const f of db.prepare('SELECT id FROM channel_files WHERE channel_id = ?').all(c.id)) { try { fs.unlinkSync(path.join(CH_FILES, f.id)); } catch { /* нет */ } }
+  db.prepare('DELETE FROM channels WHERE id = ?').run(c.id);
+  for (const { user_id } of subs) sendTo(user_id, { type: 'channelRemoved', channelId: c.id });
+  res.json({ ok: true });
+});
+app.get('/api/channels/:id/posts', auth, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  const before = Number(req.query.before) || Number.MAX_SAFE_INTEGER;
+  const rows = cq.postsBefore.all(c.id, before, 30).reverse();
+  for (const r of rows) cq.view.run(r.id, req.user.id);
+  res.json({ posts: rows.map((r) => postView(r, req.user.id)), hasMore: rows.length === 30 });
+});
+app.post('/api/channels/:id/posts', auth, json, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  if (!canPost(c.id, req.user.id)) return fail(res, 403, 'Публиковать могут только владелец и админы');
+  const body = cleanPost(req.body);
+  if (!body.text && !body.image) return fail(res, 400, 'Пустая публикация');
+  if (body.image && !db.prepare('SELECT 1 FROM channel_files WHERE id = ? AND channel_id = ?').get(body.image.id, c.id)) return fail(res, 400, 'Картинка не найдена');
+  const id = cq.addPost.run(c.id, req.user.id, JSON.stringify(body), now()).lastInsertRowid;
+  cq.view.run(id, req.user.id);
+  cq.setRead.run(id, c.id, req.user.id);
+  const post = postView(cq.post.get(id), req.user.id);
+  chBroadcast(c.id, { type: 'channelPost', channelId: c.id, post });
+  res.json({ post });
+});
+app.patch('/api/channels/:id/posts/:pid', auth, json, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  const p = cq.post.get(Number(req.params.pid));
+  if (!p || p.channel_id !== c.id) return fail(res, 404, 'Публикация не найдена');
+  if (!canPost(c.id, req.user.id)) return fail(res, 403, 'Нет прав');
+  const old = JSON.parse(p.body);
+  const body = { ...old, text: String(req.body?.text || '').slice(0, 8000).trim() };
+  if (!body.text && !body.image) return fail(res, 400, 'Пустая публикация');
+  cq.editPost.run(JSON.stringify(body), now(), p.id);
+  chBroadcast(c.id, { type: 'channelPostUpdated', channelId: c.id, postId: p.id });
+  res.json({ post: postView(cq.post.get(p.id), req.user.id) });
+});
+app.delete('/api/channels/:id/posts/:pid', auth, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  const p = cq.post.get(Number(req.params.pid));
+  if (!p || p.channel_id !== c.id) return fail(res, 404, 'Публикация не найдена');
+  if (!canPost(c.id, req.user.id)) return fail(res, 403, 'Нет прав');
+  cq.delPost.run(p.id);
+  chBroadcast(c.id, { type: 'channelPostDeleted', channelId: c.id, postId: p.id });
+  res.json({ ok: true });
+});
+app.post('/api/channels/:id/posts/:pid/react', auth, json, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  const p = cq.post.get(Number(req.params.pid));
+  if (!p || p.channel_id !== c.id || !cq.sub.get(c.id, req.user.id)) return fail(res, 404, 'Публикация не найдена');
+  const emoji = String(req.body?.emoji || '');
+  if (!REACTIONS.includes(emoji)) return fail(res, 400, 'Такой реакции нет');
+  const cur = db.prepare('SELECT emoji FROM channel_reactions WHERE post_id = ? AND user_id = ?').get(p.id, req.user.id)?.emoji;
+  if (cur === emoji) db.prepare('DELETE FROM channel_reactions WHERE post_id = ? AND user_id = ?').run(p.id, req.user.id);
+  else db.prepare('INSERT INTO channel_reactions (post_id, user_id, emoji) VALUES (?, ?, ?) ON CONFLICT(post_id, user_id) DO UPDATE SET emoji = excluded.emoji').run(p.id, req.user.id, emoji);
+  chBroadcast(c.id, { type: 'channelPostUpdated', channelId: c.id, postId: p.id });
+  res.json({ post: postView(cq.post.get(p.id), req.user.id) });
+});
+app.get('/api/channels/:id/posts/:pid', auth, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  const p = cq.post.get(Number(req.params.pid));
+  if (!p || p.channel_id !== c.id) return fail(res, 404, 'Публикация не найдена');
+  res.json({ post: postView(p, req.user.id) });
+});
+app.post('/api/channels/:id/read', auth, json, (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  const upto = Number(req.body?.postId) || 0;
+  const sub = cq.sub.get(c.id, req.user.id);
+  if (sub) {
+    for (const r of db.prepare('SELECT id FROM channel_posts WHERE channel_id = ? AND id > ? AND id <= ? ORDER BY id DESC LIMIT 200').all(c.id, sub.last_read_id, upto)) cq.view.run(r.id, req.user.id);
+  }
+  cq.setRead.run(upto, c.id, req.user.id);
+  res.json({ ok: true });
+});
+app.post('/api/channels/:id/files', auth, express.raw({ type: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'], limit: '10mb' }), (req, res) => {
+  const c = chGet(req, res); if (!c) return;
+  if (!canPost(c.id, req.user.id)) return fail(res, 403, 'Нет прав');
+  if (!Buffer.isBuffer(req.body) || req.body.length < 50) return fail(res, 400, 'Пустой файл');
+  const id = crypto.randomBytes(16).toString('hex');
+  fs.writeFileSync(path.join(CH_FILES, id), req.body);
+  db.prepare('INSERT INTO channel_files (id, channel_id, mime, size) VALUES (?, ?, ?, ?)').run(id, c.id, req.headers['content-type'], req.body.length);
+  res.json({ id });
+});
+app.get('/api/channel-files/:id', auth, (req, res) => {
+  const f = db.prepare('SELECT * FROM channel_files WHERE id = ?').get(String(req.params.id));
+  if (!f) return fail(res, 404, 'Нет файла');
+  res.setHeader('Content-Type', f.mime);
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  fs.createReadStream(path.join(CH_FILES, f.id)).pipe(res);
+});
+
 /* ---------- Звёзды и подарки ---------- */
 const GIFTS = [
   { id: 'heart', name: 'Сердце', price: 15, upgrade: 25 },

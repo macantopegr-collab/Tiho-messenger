@@ -64,6 +64,7 @@
     up: '<path d="m6 15 6-6 6 6"/>',
     poll: '<path d="M5 20V10M12 20V4M19 20v-7"/>',
     forward: '<path d="m15 5 6 6-6 6"/><path d="M21 11H10a6 6 0 0 0-6 6v2"/>',
+    megaphone: '<path d="M3 11v2a1 1 0 0 0 1 1h3l6 4V6L7 10H4a1 1 0 0 0-1 1Z"/><path d="M17 8a5 5 0 0 1 0 8M7 14l1.5 5h2.5l-1-4.5"/>',
     chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>',
   };
   function icon(name, size = 22, sw = 2) {
@@ -127,7 +128,7 @@
     me: null, priv: null, pub: null, config: { maxFile: 25 * 1024 * 1024 },
     chats: new Map(), msgs: new Map(), plain: new Map(), userKeys: new Map(),
     active: null, filter: 'all', query: '', people: [], typing: new Map(),
-    tab: 'chats', page: null, folders: [], searchQ: '', wallet: null, catalog: null, reply: null, edit: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
+    tab: 'chats', page: null, channels: new Map(), cposts: new Map(), channel: null, channelHits: [], folders: [], searchQ: '', wallet: null, catalog: null, reply: null, edit: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
   };
 
   /* ---------- форматирование ---------- */
@@ -578,7 +579,10 @@
         h('label', { class: 'search' }, icon('search', 18), searchInput),
         chips),
       list,
-      h('button', { class: 'fab', 'aria-label': 'Новый чат', title: 'Новый чат', onclick: () => openPicker('direct') }, icon('edit', 22)));
+      h('button', { class: 'fab', 'aria-label': 'Создать', title: 'Создать', onclick: (e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        openMenu(r.right - 220, r.top - 150, [['chat', 'Новый чат', () => openPicker('direct')], ['group', 'Новая группа', () => openPicker('group')], ['megaphone', 'Новый канал', openNewChannel]]);
+      } }, icon('edit', 22)));
     const contactsView = h('div', { class: 'tab-view', 'data-tab': 'contacts' });
     const callsView = h('div', { class: 'tab-view', 'data-tab': 'calls' });
     const profileView = h('div', { class: 'tab-view', 'data-tab': 'profile' });
@@ -598,6 +602,7 @@
     renderList();
     renderPane();
     loadChats().then(openFromLink);
+    loadChannels();
     getCatalog().then(() => { renderList(); if (S.active) renderMessages(); }).catch(() => {});
     connect();
   }
@@ -748,11 +753,11 @@
     renderList();
     clearTimeout(searchTimer);
     const qv = S.query.replace(/^@/, '');
-    if (qv.length < 2) { S.people = []; return; }
+    if (qv.length < 2) { S.people = []; S.channelHits = []; return; }
     searchTimer = setTimeout(async () => {
       try {
-        const { users } = await api('/api/users/search?q=' + encodeURIComponent(qv));
-        if (S.query.replace(/^@/, '') === qv) { S.people = users; renderList(); }
+        const [{ users }, ch] = await Promise.all([api('/api/users/search?q=' + encodeURIComponent(qv)), api('/api/channels/search?q=' + encodeURIComponent(qv)).catch(() => ({ channels: [] }))]);
+        if (S.query.replace(/^@/, '') === qv) { S.people = users; S.channelHits = ch.channels; renderList(); }
       } catch { /* молча */ }
     }, 250);
   }
@@ -790,12 +795,19 @@
         h('span', { class: 'add-ic' }, icon('back', 22)), h('span', { class: 'ci-name' }, 'Выйти из архива'))));
     }
     if (S.filter === 'direct' || S.filter === 'group') chats = chats.filter((c) => c.type === S.filter);
+    if (S.filter === 'channels') chats = [];
+    let chans = ['all', 'channels', 'unread'].includes(S.filter) ? [...S.channels.values()].filter((c) => c.subscribed) : [];
+    if (S.filter === 'unread') chans = chans.filter((c) => c.unread > 0);
+    if (qv) chans = chans.filter((c) => c.title.toLowerCase().includes(qv) || c.slug.toLowerCase().includes(qv.replace(/^@/, '')));
     if (S.filter === 'unread') chats = chats.filter((c) => c.unread > 0);
     if (qv) chats = chats.filter((c) => chatTitle(c).toLowerCase().includes(qv) ||
       (c.type === 'direct' && other(c)?.username.toLowerCase().includes(qv.replace(/^@/, ''))));
 
-    if (qv && chats.length) list.append(h('li', { class: 'list-label' }, 'Чаты'));
-    for (const c of chats) {
+    const mixed = chats.map((c) => ({ t: lastTs(c), c })).concat(chans.map((c) => ({ t: chLastTs(c), ch: c }))).sort((x, y) => y.t - x.t);
+    if (qv && mixed.length) list.append(h('li', { class: 'list-label' }, 'Чаты'));
+    for (const row of mixed) {
+      if (row.ch) { list.append(channelItem(row.ch)); continue; }
+      const c = row.c;
       const lm = c.lastMessage;
       const p = lm ? plainOf(lm) : null;
       const ty = typingText(c.id);
@@ -820,6 +832,10 @@
       list.append(h('li', null, item));
     }
     if (!qv && S.filter.startsWith('f:') && !chats.length) list.append(h('li', { class: 'list-empty' }, 'В папке пока нет чатов. Нажмите и удерживайте чат в списке → «Добавить в папку».'));
+    const subIds = new Set(chans.map((c) => c.id));
+    const foundCh = qv ? S.channelHits.filter((c) => !subIds.has(c.id)) : [];
+    if (foundCh.length) { list.append(h('li', { class: 'list-label' }, 'Каналы')); foundCh.forEach((c) => list.append(channelItem(c))); }
+    if (S.filter === 'channels' && !qv && !chans.length) list.append(h('li', { class: 'list-empty' }, 'Вы пока не подписаны на каналы. Найдите канал через поиск или создайте свой: кнопка-карандаш → «Новый канал».'));
     if (qv && S.people.length) {
       const directIds = new Set([...S.chats.values()].filter((c) => c.type === 'direct').map((c) => other(c)?.id));
       const fresh = S.people.filter((u) => !directIds.has(u.id) || !chats.some((c) => c.type === 'direct' && other(c)?.id === u.id));
@@ -851,7 +867,7 @@
   }
 
   function updateTitle() {
-    const n = [...S.chats.values()].reduce((s, c) => s + (c.unread || 0), 0);
+    const n = [...S.chats.values()].reduce((s, c) => s + (c.unread || 0), 0) + [...S.channels.values()].reduce((s, c) => s + (c.subscribed ? c.unread || 0 : 0), 0);
     document.title = n ? `(${n}) Тихо` : 'Тихо';
     const tb = S.refs.tabbar?.querySelector('.tab-badge');
     if (tb) { tb.textContent = n > 99 ? '99+' : n; tb.style.display = n ? '' : 'none'; }
@@ -867,6 +883,13 @@
   }
   /* Открыли ссылку вида /@username — сразу открываем чат с этим человеком */
   async function openFromLink() {
+    const cm = /^\/c\/([a-zA-Z0-9_]{4,32})\/?$/.exec(location.pathname);
+    if (cm) {
+      history.replaceState(null, '', '/');
+      try { const { channel } = await api('/api/channels/by-slug/' + encodeURIComponent(cm[1])); openChannel(channel, true); }
+      catch { toast('Канал не найден'); }
+      return;
+    }
     const m = /^\/@([a-zA-Z0-9_]{3,32})\/?$/.exec(location.pathname);
     if (!m) return;
     history.replaceState(null, '', '/');
@@ -890,8 +913,8 @@
 
   /* ---------- открытый чат ---------- */
   function openChat(id) {
-    const wasOpen = S.active != null || !!S.page;
-    S.page = null;
+    const wasOpen = S.active != null || !!S.page || S.channel != null;
+    S.page = null; S.channel = null;
     S.active = id;
     S.reply = null;
     S.newBelow = 0;
@@ -912,7 +935,7 @@
   }
   window.addEventListener('popstate', () => {
     if (!MOBILE()) return;
-    if (S.page) closePage(); else if (S.active != null) closeChat();
+    if (S.page) closePage(); else if (S.channel != null) closeChannel(); else if (S.active != null) closeChat();
   });
   function openPage(page) {
     const was = S.page || S.active != null;
@@ -924,7 +947,7 @@
   }
   function closePage() {
     S.page = null;
-    if (S.active == null) S.refs.app.classList.remove('in-chat');
+    if (S.active == null && S.channel == null) S.refs.app.classList.remove('in-chat');
     renderPane();
   }
   function openChatPage(chat) {
@@ -995,6 +1018,7 @@
   function renderPane() {
     const pane = clear(S.refs.pane);
     if (S.page) { S.refs.msgs = null; S.refs.head = null; return renderPage(pane); }
+    if (S.channel != null && S.channels.has(S.channel)) return renderChannel(pane);
     const chat = S.chats.get(S.active);
     if (!chat) {
       pane.append(h('div', { class: 'empty-pane' },
@@ -1760,7 +1784,7 @@
     S.ws = ws;
     let opened = false;
     ws.onopen = () => {
-      if (S.wsReconnect) loadChats();
+      if (S.wsReconnect) { loadChats(); loadChannels(); }
       opened = true; S.wsDelay = 1000; S.wsReconnect = true;
     };
     ws.onmessage = (e) => { let d; try { d = JSON.parse(e.data); } catch { return; } onEvent(d); };
@@ -1793,6 +1817,18 @@
       return;
     }
     if (d.type === 'messageUpdated') return applyUpdated(d.message);
+    if (d.type === 'channelPost') {
+      const c = S.channels.get(d.channelId);
+      if (!c) return loadChannels();
+      const viewing = S.channel === c.id && !document.hidden;
+      if (d.post.author?.id !== S.me.id && !viewing) c.unread = (c.unread || 0) + 1;
+      addPost(c.id, d.post); updateTitle();
+      return;
+    }
+    if (d.type === 'channelPostUpdated') { api(`/api/channels/${d.channelId}/posts/${d.postId}`).then((r) => replacePost(d.channelId, r.post)).catch(() => {}); return; }
+    if (d.type === 'channelPostDeleted') return removePost(d.channelId, d.postId);
+    if (d.type === 'channel') return loadChannels();
+    if (d.type === 'channelRemoved') return dropChannel(d.channelId);
     if (d.type === 'votes') {
       const m = S.msgs.get(d.chatId)?.list.find((x) => x.id === d.messageId);
       if (m) { m.votes = d.votes; if (S.active === d.chatId) renderMessages('keep'); }
@@ -2223,6 +2259,280 @@
     });
   }
 
+  /* ================= КАНАЛЫ ================= */
+  const chAvatar = (c, size = 52) => h('div', { class: 'av ch-av', style: `width:${size}px;height:${size}px;font-size:${Math.round(size * .36)}px;background:${AV_COLORS[(c.color || 0) % 8]}` }, initials(c.title));
+  const chLastTs = (c) => c.lastPost?.createdAt || c.createdAt;
+  const chPreview = (p) => !p ? 'Нет публикаций' : (p.body.image && !p.body.text ? 'Фото' : (p.body.image ? 'Фото · ' : '') + p.body.text.replace(/\s+/g, ' '));
+  const canPostIn = (c) => c && (c.role === 'owner' || c.role === 'admin');
+  async function loadChannels() {
+    try {
+      const { channels } = await api('/api/channels');
+      S.channels = new Map(channels.map((c) => [c.id, c]));
+      renderList(); updateTitle();
+      if (S.channel && S.channels.has(S.channel)) renderChannelHead();
+    } catch { /* без каналов */ }
+  }
+  function channelItem(c) {
+    const item = h('button', { class: 'chat-item', 'aria-current': String(S.channel === c.id), onclick: () => openChannel(c) },
+      chAvatar(c, 52),
+      h('div', { class: 'ci-body' },
+        h('div', { class: 'ci-row' }, h('span', { class: 'muted', title: 'Канал' }, icon('megaphone', 15)),
+          h('span', { class: 'ci-name' }, c.title), h('span', { class: 'ci-time' + (c.unread ? ' hot' : '') }, shortTime(chLastTs(c)))),
+        h('div', { class: 'ci-row' }, h('span', { class: 'ci-prev' }, c.subscribed ? chPreview(c.lastPost) : `@${c.slug} · ${c.subscribers} ${plural(c.subscribers, 'подписчик', 'подписчика', 'подписчиков')}`),
+          c.unread ? h('span', { class: 'badge muted-badge' }, c.unread > 99 ? '99+' : c.unread) : null)));
+    return h('li', null, item);
+  }
+  async function openChannel(c, fromLink) {
+    const wasOpen = S.active != null || !!S.page || S.channel != null;
+    if (!S.channels.has(c.id)) S.channels.set(c.id, c);
+    S.channel = c.id; S.active = null; S.page = null;
+    S.refs.app.classList.add('in-chat');
+    if (MOBILE() && !wasOpen) history.pushState({ chat: 'c' + c.id }, '');
+    renderList(); renderPane();
+    if (!S.cposts.has(c.id)) await loadPosts(c.id);
+  }
+  function closeChannel() { S.channel = null; S.refs.app?.classList.remove('in-chat'); renderList(); renderPane(); }
+  async function loadPosts(id, older = false) {
+    const box = S.cposts.get(id) || { list: [], hasMore: true, loading: false };
+    if (box.loading) return;
+    box.loading = true; S.cposts.set(id, box);
+    try {
+      const before = older && box.list.length ? box.list[0].id : '';
+      const r = await api(`/api/channels/${id}/posts${before ? '?before=' + before : ''}`);
+      const have = new Set(box.list.map((p) => p.id));
+      const fresh = r.posts.filter((p) => !have.has(p.id));
+      box.list = older ? fresh.concat(box.list) : box.list.concat(fresh).sort((a, b) => a.id - b.id);
+      box.hasMore = r.hasMore;
+    } catch (e) { toast(e.message); }
+    box.loading = false;
+    if (S.channel === id) { renderPosts(older ? 'keep' : 'bottom'); markChannelRead(); }
+  }
+  function markChannelRead() {
+    const c = S.channels.get(S.channel);
+    const last = S.cposts.get(S.channel)?.list.at(-1);
+    if (!c || !last || document.hidden || !c.subscribed) return;
+    if (c.unread) { c.unread = 0; renderList(); updateTitle(); }
+    api(`/api/channels/${c.id}/read`, { body: { postId: last.id } }).catch(() => {});
+  }
+  function renderChannel(pane) {
+    const c = S.channels.get(S.channel);
+    if (!c) return;
+    const head = h('header', { class: 'chat-head' });
+    const msgs = h('div', { class: 'msgs ch-feed', onscroll: () => { if (msgs.scrollTop < 80) { const b = S.cposts.get(c.id); if (b?.hasMore && !b.loading) loadPosts(c.id, true); } } });
+    const inner = h('div', { class: 'msgs-inner' });
+    msgs.append(inner);
+    const foot = h('div', { class: 'composer-wrap' });
+    pane.append(head, h('div', { class: 'msgs-wrap' }, msgs), foot);
+    Object.assign(S.refs, { head, msgs, inner, chFoot: foot });
+    renderChannelHead(); renderPosts('bottom'); renderChannelFoot();
+  }
+  function renderChannelHead() {
+    const c = S.channels.get(S.channel);
+    const head = S.refs.head;
+    if (!c || !head) return;
+    clear(head).append(
+      h('button', { class: 'icon-btn back', 'aria-label': 'Назад к чатам', onclick: () => (history.state?.chat ? history.back() : closeChannel()) }, icon('back', 24)),
+      h('button', { class: 'head-av', 'aria-label': 'О канале', onclick: () => openChannelInfo(c) }, chAvatar(c, 42)),
+      h('button', { class: 'head-title', onclick: () => openChannelInfo(c) }, h('b', null, c.title),
+        h('small', null, `${c.subscribers} ${plural(c.subscribers, 'подписчик', 'подписчика', 'подписчиков')}`)),
+      h('button', { class: 'icon-btn', 'aria-label': 'О канале', onclick: () => openChannelInfo(c) }, icon('more', 22)));
+  }
+  function renderPosts(scroll) {
+    const c = S.channels.get(S.channel);
+    const { msgs, inner } = S.refs;
+    if (!c || !inner) return;
+    const prevH = msgs.scrollHeight, prevTop = msgs.scrollTop;
+    const atBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 120;
+    clear(inner);
+    inner.append(h('div', { class: 'ch-note' }, icon('megaphone', 15), 'Канал: публикации видят все подписчики, они не шифруются сквозным шифрованием.'));
+    const box = S.cposts.get(c.id);
+    if (!box || (box.loading && !box.list.length)) inner.append(h('div', { style: 'align-self:center;padding:24px' }, h('div', { class: 'spin' })));
+    else {
+      if (!box.list.length) inner.append(h('div', { class: 'sys' }, canPostIn(c) ? 'Напишите первую публикацию — её увидят все подписчики' : 'В канале пока нет публикаций'));
+      let prev = null;
+      for (const p of box.list) {
+        if (!prev || !sameDay(prev.createdAt, p.createdAt)) inner.append(h('div', { class: 'day' }, h('span', null, dayLabel(p.createdAt))));
+        inner.append(postEl(c, p));
+        prev = p;
+      }
+    }
+    if (scroll === 'bottom' || (scroll !== 'keep' && atBottom)) msgs.scrollTop = msgs.scrollHeight;
+    else if (scroll === 'keep') msgs.scrollTop = prevTop + (msgs.scrollHeight - prevH);
+  }
+  function postEl(c, p) {
+    const card = h('article', { class: 'post', 'data-id': p.id },
+      h('div', { class: 'post-head' }, chAvatar(c, 28), h('b', null, c.title)),
+      p.body.image ? h('img', { class: 'post-img', src: '/api/channel-files/' + p.body.image.id, alt: '', loading: 'lazy',
+        style: p.body.image.w ? `aspect-ratio:${p.body.image.w}/${p.body.image.h}` : '', onclick: (e) => openViewer(e.target.src, 'image') }) : null,
+      p.body.text ? h('div', { class: 'post-text' }, ...linkify(p.body.text)) : null,
+      p.reactions.length ? h('div', { class: 'reacts' }, p.reactions.map((r) => h('button', { class: 'react' + (r.mine ? ' mine' : ''), 'aria-pressed': String(r.mine),
+        onclick: () => reactPost(c, p, r.emoji) }, h('span', { class: 'emo' }, r.emoji), String(r.count)))) : null,
+      h('div', { class: 'post-meta' }, h('span', { class: 'views' }, icon('eye', 14), String(p.views)),
+        p.editedAt ? h('span', { class: 'edited' }, 'изменено') : null, h('span', null, hm(p.createdAt))));
+    const items = [
+      c.subscribed && ['smile', 'Реакция…', () => {
+        const r = card.getBoundingClientRect();
+        openMenu(r.left + 20, r.bottom - 60, Object.assign([], { reactions: { list: S.config.reactions || ['👍'], pick: (e) => reactPost(c, p, e), mine: p.reactions.find((x) => x.mine)?.emoji } }));
+      }],
+      p.body.text && ['copy', 'Копировать текст', () => copyText(p.body.text)],
+      ['link', 'Ссылка на канал', () => copyText(`${location.origin}/c/${c.slug}`)],
+      canPostIn(c) && p.body.text !== undefined && ['edit', 'Изменить', () => editPost(c, p)],
+      canPostIn(c) && ['trash', 'Удалить', () => deletePost(c, p), 'danger'],
+    ].filter(Boolean);
+    if (c.subscribed) items.reactions = { list: S.config.reactions || ['👍'], pick: (e) => reactPost(c, p, e), mine: p.reactions.find((x) => x.mine)?.emoji };
+    card.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, items, card); });
+    card.addEventListener('dblclick', (e) => { if (c.subscribed && !e.target.closest('button,a')) reactPost(c, p, (S.config.reactions || ['👍'])[0]); });
+    longPress(card, (x, y) => openMenu(x, y, items, card));
+    return card;
+  }
+  async function reactPost(c, p, emoji) {
+    try { const { post } = await api(`/api/channels/${c.id}/posts/${p.id}/react`, { body: { emoji } }); replacePost(c.id, post); } catch (e) { toast(e.message); }
+  }
+  function replacePost(cid, post) {
+    const box = S.cposts.get(cid);
+    const i = box?.list.findIndex((x) => x.id === post.id);
+    if (i >= 0) box.list[i] = post;
+    const c = S.channels.get(cid);
+    if (c?.lastPost?.id === post.id) c.lastPost = post;
+    if (S.channel === cid) renderPosts('keep');
+  }
+  function editPost(c, p) {
+    const ta = h('textarea', { class: 'input', rows: 6, style: 'height:auto;padding:12px;resize:vertical' });
+    ta.value = p.body.text || '';
+    const close = modal('Изменить публикацию', [ta, h('button', { class: 'btn block', onclick: async () => {
+      try { const { post } = await api(`/api/channels/${c.id}/posts/${p.id}`, { method: 'PATCH', body: { text: ta.value } }); replacePost(c.id, post); close(); } catch (e) { toast(e.message); }
+    } }, 'Сохранить')]);
+  }
+  async function deletePost(c, p) {
+    if (!confirm('Удалить публикацию у всех подписчиков?')) return;
+    try { await api(`/api/channels/${c.id}/posts/${p.id}`, { method: 'DELETE' }); removePost(c.id, p.id); } catch (e) { toast(e.message); }
+  }
+  function removePost(cid, pid) {
+    const box = S.cposts.get(cid);
+    if (box) box.list = box.list.filter((x) => x.id !== pid);
+    const c = S.channels.get(cid);
+    if (c?.lastPost?.id === pid) { c.lastPost = box?.list.at(-1) || null; }
+    renderList();
+    if (S.channel === cid) renderPosts('keep');
+  }
+  function renderChannelFoot() {
+    const c = S.channels.get(S.channel);
+    const foot = S.refs.chFoot;
+    if (!c || !foot) return;
+    clear(foot);
+    if (canPostIn(c)) {
+      const ta = h('textarea', { rows: 1, placeholder: 'Новая публикация', 'aria-label': 'Текст публикации' });
+      let image = null;
+      const prevBox = h('div');
+      const fileIn = h('input', { type: 'file', accept: 'image/*', class: 'sr', tabindex: '-1', 'aria-hidden': 'true', onchange: async () => {
+        const f = fileIn.files[0]; fileIn.value = '';
+        if (!f) return;
+        if (f.size > 10 * 1024 * 1024) return toast('Картинка больше 10 МБ');
+        try {
+          let w = 0, hh = 0;
+          try { const bmp = await createImageBitmap(f); w = bmp.width; hh = bmp.height; bmp.close?.(); } catch { /* размеры неизвестны */ }
+          const { id } = await api(`/api/channels/${c.id}/files`, { raw: f, type: f.type || 'image/jpeg' });
+          image = { id, w, h: hh };
+          clear(prevBox).append(h('div', { class: 'reply-bar' }, icon('image', 20), h('div', null, h('b', null, 'Фото прикреплено'), h('span', null, f.name)),
+            h('button', { class: 'icon-btn', 'aria-label': 'Убрать фото', onclick: () => { image = null; clear(prevBox); } }, icon('close', 20))));
+        } catch (e) { toast(e.message); }
+      } });
+      const publish = async () => {
+        const text = ta.value.trim();
+        if (!text && !image) return;
+        btn.disabled = true;
+        try {
+          const { post } = await api(`/api/channels/${c.id}/posts`, { body: { text, image } });
+          ta.value = ''; image = null; clear(prevBox); ta.style.height = 'auto';
+          addPost(c.id, post);
+        } catch (e) { toast(e.message); }
+        btn.disabled = false;
+      };
+      const btn = h('button', { class: 'send', 'aria-label': 'Опубликовать', onclick: publish }, icon('send', 20, 2.2));
+      ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 200) + 'px'; });
+      ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); publish(); } });
+      foot.append(prevBox, h('div', { class: 'composer' },
+        h('button', { class: 'icon-btn', style: 'color:var(--muted)', 'aria-label': 'Прикрепить фото', onclick: () => fileIn.click() }, icon('image', 22, 1.8)),
+        h('label', { class: 'field' }, ta), btn, fileIn));
+    } else if (c.subscribed) {
+      foot.append(h('div', { class: 'ch-bar' }, h('button', { class: 'btn ghost block', onclick: () => openChannelInfo(c) }, icon('check', 18), 'Вы подписаны')));
+    } else {
+      foot.append(h('div', { class: 'ch-bar' }, h('button', { class: 'btn block big', onclick: () => joinChannel(c) }, 'Подписаться')));
+    }
+  }
+  function addPost(cid, post) {
+    const box = S.cposts.get(cid);
+    if (box && !box.list.some((x) => x.id === post.id)) box.list.push(post);
+    const c = S.channels.get(cid);
+    if (c) c.lastPost = post;
+    renderList();
+    if (S.channel === cid) { renderPosts(); markChannelRead(); }
+  }
+  async function joinChannel(c) {
+    try {
+      const { channel } = await api(`/api/channels/${c.id}/join`, { method: 'POST' });
+      S.channels.set(channel.id, channel);
+      toast('Вы подписались на «' + channel.title + '»');
+      renderList(); renderChannelHead(); renderChannelFoot();
+    } catch (e) { toast(e.message); }
+  }
+  function openChannelInfo(c) {
+    const link = `${location.origin}/c/${c.slug}`;
+    const body = [
+      h('div', { class: 'pg-hero' }, chAvatar(c, 96), h('h2', null, c.title),
+        h('span', { class: 'muted' }, `@${c.slug} · ${c.subscribers} ${plural(c.subscribers, 'подписчик', 'подписчика', 'подписчиков')}`),
+        c.about ? h('p', { class: 'pg-bio' }, c.about) : null),
+      h('div', { class: 'field-label' }, 'Ссылка на канал',
+        h('div', { class: 'secret' }, h('code', null, link), h('button', { class: 'icon-btn', 'aria-label': 'Скопировать ссылку', onclick: () => copyText(link) }, icon('copy', 18)))),
+    ];
+    if (c.role === 'owner') {
+      body.push(h('button', { class: 'btn ghost block', onclick: () => { close(); editChannel(c); } }, icon('edit', 18), 'Изменить канал'));
+      body.push(h('button', { class: 'btn danger block', onclick: async () => {
+        if (!confirm(`Удалить канал «${c.title}» вместе со всеми публикациями?`)) return;
+        try { await api(`/api/channels/${c.id}`, { method: 'DELETE' }); close(); dropChannel(c.id); } catch (e) { toast(e.message); }
+      } }, icon('trash', 18), 'Удалить канал'));
+    } else if (c.subscribed) {
+      body.push(h('button', { class: 'btn danger block', onclick: async () => {
+        try { await api(`/api/channels/${c.id}/leave`, { method: 'POST' }); close(); c.subscribed = false; c.role = null; c.subscribers--; S.channels.delete(c.id); closeChannel(); toast('Вы отписались'); } catch (e) { toast(e.message); }
+      } }, icon('leave', 18), 'Отписаться'));
+    } else {
+      body.push(h('button', { class: 'btn block big', onclick: () => { close(); joinChannel(c); } }, 'Подписаться'));
+    }
+    body.push(h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Публикации канала видят все подписчики. В отличие от личных чатов и групп, они не шифруются сквозным шифрованием.'));
+    const close = modal('Канал', body);
+  }
+  function dropChannel(id) { S.channels.delete(id); S.cposts.delete(id); if (S.channel === id) closeChannel(); else renderList(); }
+  function editChannel(c) {
+    const title = h('input', { class: 'input', value: c.title, maxlength: 64 });
+    const about = h('textarea', { class: 'input', rows: 3, style: 'height:auto;padding:12px' });
+    about.value = c.about || '';
+    const close = modal('Изменить канал', [h('label', { class: 'field-label' }, 'Название', title), h('label', { class: 'field-label' }, 'Описание', about),
+      h('button', { class: 'btn block', onclick: async () => {
+        try { const { channel } = await api(`/api/channels/${c.id}`, { method: 'PATCH', body: { title: title.value, about: about.value } }); S.channels.set(channel.id, channel); close(); renderList(); renderChannelHead(); } catch (e) { toast(e.message); }
+      } }, 'Сохранить')]);
+  }
+  function openNewChannel() {
+    const title = h('input', { class: 'input', maxlength: 64, placeholder: 'Например: Новости района' });
+    const slug = h('input', { class: 'input', maxlength: 32, placeholder: 'news_rayon', autocapitalize: 'none', spellcheck: 'false' });
+    const about = h('textarea', { class: 'input', rows: 3, style: 'height:auto;padding:12px', placeholder: 'О чём канал' });
+    const err = h('div', { class: 'err', role: 'alert' });
+    const close = modal('Новый канал', [
+      h('label', { class: 'field-label' }, 'Название', title),
+      h('label', { class: 'field-label' }, 'Адрес канала', h('div', { class: 'slug-row' }, h('span', { class: 'muted' }, '/c/'), slug)),
+      h('label', { class: 'field-label' }, 'Описание', about),
+      h('div', { class: 'note' }, icon('megaphone', 18), h('span', null, 'В канале пишете вы, остальные читают. Публикации не шифруются сквозным шифрованием, чтобы новые подписчики видели историю и канал открывался по ссылке.')),
+      err,
+      h('button', { class: 'btn block big', onclick: async () => {
+        err.textContent = '';
+        try {
+          const { channel } = await api('/api/channels', { body: { title: title.value, slug: slug.value, about: about.value } });
+          S.channels.set(channel.id, channel); close(); openChannel(channel);
+        } catch (e) { err.textContent = e.message; }
+      } }, 'Создать канал'),
+    ]);
+    setTimeout(() => title.focus(), 40);
+  }
+
   /* ================= СТИКЕРЫ И GIF ================= */
   const EMOJI = '😀 😂 🥹 😊 😍 🥰 😘 😎 🤔 😅 😭 😡 🥳 😴 🤗 🙃 😏 😬 🤯 🥺 👍 👎 👏 🙏 💪 🤝 👋 ✌️ 🤞 👀 ❤️ 💙 💚 🖤 💔 🔥 ✨ 🎉 💯 ✅ ❌ ⚡ 🌙 ☀️ 🌧 ❄️ 🍕 🍔 ☕ 🍺 🎂 🎁 🐱 🐶 🦊 🌲 🌸 🏔 🌊 🚗 ✈️ 🏠 📍 ⏰ 📷 🎵 ⚽ 🎮'.split(' ');
   const recentKey = () => 'tiho-recent-stickers-' + S.me.id;
@@ -2336,7 +2646,7 @@
     const box = S.refs.chips;
     if (!box) return;
     clear(box);
-    const base = [['all', 'Все'], ['direct', 'Личные'], ['group', 'Группы'], ['unread', 'Непрочитанные']];
+    const base = [['all', 'Все'], ['direct', 'Личные'], ['group', 'Группы'], ['channels', 'Каналы'], ['unread', 'Непрочитанные']];
     const items = base.concat((S.folders || []).map((f) => ['f:' + f.id, f.name]));
     if (S.filter === 'archive') items.push(['archive', 'Архив']);
     for (const [k, label] of items) {

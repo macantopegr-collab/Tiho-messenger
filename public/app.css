@@ -669,3 +669,21 @@ mark{background:#FFD34D;color:#141413;border-radius:3px;padding:0 1px}
 .out .sticker-b .meta{background:var(--out-bg)}
 .img-box{position:relative}
 .gif-badge{position:absolute;left:8px;top:8px;padding:2px 7px;border-radius:7px;background:rgba(0,0,0,.6);color:#fff;font-size:11px;font-weight:800;letter-spacing:.04em}
+
+/* =================== v8: каналы =================== */
+.ch-feed .msgs-inner{max-width:640px}
+.ch-note{align-self:center;display:flex;align-items:center;gap:8px;max-width:380px;padding:8px 14px;margin:4px 0 10px;border-radius:12px;background:var(--surface);color:var(--muted);font-size:13px;line-height:1.35;text-align:center}
+.post{background:var(--surface);border-radius:18px;padding:12px 14px 8px;display:flex;flex-direction:column;gap:8px;margin:4px 0;box-shadow:0 1px 1.5px rgba(0,0,0,.08);overflow-wrap:anywhere}
+.post-head{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--accent)}
+.post-head .av{width:28px!important;height:28px!important;font-size:11px!important}
+.post-img{width:calc(100% + 28px);margin:0 -14px;max-height:520px;object-fit:cover;display:block;cursor:zoom-in;background:var(--field)}
+.post-text{font-size:15.5px;line-height:1.5;white-space:pre-wrap}
+.post-text a{color:var(--accent)}
+.post-meta{display:flex;align-items:center;justify-content:flex-end;gap:10px;font-size:12px;color:var(--muted)}
+.views{display:inline-flex;align-items:center;gap:4px}
+.post .reacts{margin-top:0}
+.ch-bar{padding:10px;max-width:640px;margin:0 auto}
+.slug-row{display:flex;align-items:center;gap:6px;background:var(--field);border-radius:14px;padding-left:14px}
+.slug-row .input{background:transparent;padding-left:0}
+[data-size="s"] .post-text{font-size:14px}
+[data-size="l"] .post-text{font-size:17.5px}
