@@ -60,6 +60,10 @@
     sparkle: '<path d="M12 3c.8 4.6 2.4 6.2 7 7-4.6.8-6.2 2.4-7 7-.8-4.6-2.4-6.2-7-7 4.6-.8 6.2-2.4 7-7ZM19 15c.3 1.7.9 2.3 2.6 2.6-1.7.3-2.3.9-2.6 2.6-.3-1.7-.9-2.3-2.6-2.6 1.7-.3 2.3-.9 2.6-2.6Z"/>',
     swap: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
     eyeOff: '<path d="M3 3l18 18M10.6 6.2A10 10 0 0 1 12 6c6.5 0 10 6 10 6a17 17 0 0 1-3.2 3.9M6.6 6.6C3.8 8.3 2 12 2 12s3.5 7 10 7a9.6 9.6 0 0 0 4.4-1.1M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
+    pin: '<path d="M12 17v5"/><path d="M9 10.8V5h6v5.8l2 3.2H7Z"/>',
+    up: '<path d="m6 15 6-6 6 6"/>',
+    poll: '<path d="M5 20V10M12 20V4M19 20v-7"/>',
+    forward: '<path d="m15 5 6 6-6 6"/><path d="M21 11H10a6 6 0 0 0-6 6v2"/>',
     chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>',
   };
   function icon(name, size = 22, sw = 2) {
@@ -123,7 +127,7 @@
     me: null, priv: null, pub: null, config: { maxFile: 25 * 1024 * 1024 },
     chats: new Map(), msgs: new Map(), plain: new Map(), userKeys: new Map(),
     active: null, filter: 'all', query: '', people: [], typing: new Map(),
-    tab: 'chats', page: null, wallet: null, catalog: null, reply: null, edit: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
+    tab: 'chats', page: null, folders: [], searchQ: '', wallet: null, catalog: null, reply: null, edit: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
   };
 
   /* ---------- форматирование ---------- */
@@ -199,11 +203,17 @@
     const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
     const reply = p.reply && typeof p.reply === 'object'
       ? { id: Number(p.reply.id) || 0, name: str(p.reply.name, 80), text: str(p.reply.text, 200) } : null;
-    if (p.t === 'text') return { t: 'text', text: str(p.text, 20000), reply };
+    const fwd = p.fwd ? str(p.fwd, 80) : '';
+    if (p.t === 'text') return { t: 'text', text: str(p.text, 20000), reply, fwd };
+    if (p.t === 'poll') {
+      const options = Array.isArray(p.options) ? p.options.slice(0, 10).map((o) => str(o, 100)).filter(Boolean) : [];
+      if (options.length < 2) throw new Error('bad');
+      return { t: 'poll', question: str(p.question, 200), options, multiple: !!p.multiple, fwd };
+    }
     if (p.t === 'file') {
       return { t: 'file', fileId: str(p.fileId, 32), name: str(p.name, 200) || 'файл', size: Number(p.size) || 0,
         mime: str(p.mime, 100), key: str(p.key, 64), iv: str(p.iv, 32), w: Number(p.w) || 0, h: Number(p.h) || 0,
-        caption: str(p.caption, 4000), reply,
+        caption: str(p.caption, 4000), reply, fwd,
         dur: Math.max(0, Math.min(600, Number(p.dur) || 0)),
         wave: Array.isArray(p.wave) ? p.wave.slice(0, 64).map((v) => Math.max(0, Math.min(1, Number(v) || 0))) : null };
     }
@@ -235,6 +245,7 @@
     if (p.t === 'file') return (p.mime.startsWith('image/') ? 'Фото' : p.mime.startsWith('audio/') && p.wave ? 'Голосовое сообщение' : 'Файл: ' + p.name) + (p.caption ? ' · ' + p.caption : '');
     if (p.t === 'system') return p.text;
     if (p.t === 'deleted') return 'Сообщение удалено';
+    if (p.t === 'poll') return '📊 ' + p.question;
     if (p.t === 'gift') return '🎁 ' + ((S.catalog?.gifts || []).find((x) => x.id === p.type)?.name ? `Подарок «${S.catalog.gifts.find((x) => x.id === p.type).name}»` : 'Подарок');
     return p.reason === 'before' ? 'Сообщение до вашего вступления' : 'Не удалось расшифровать';
   }
@@ -552,13 +563,7 @@
     clear(root);
     const list = h('ul', { class: 'chat-list', 'aria-label': 'Чаты' });
     const searchInput = h('input', { type: 'search', placeholder: 'Поиск', 'aria-label': 'Поиск по чатам и @юзернейму', oninput: onSearch });
-    const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Фильтр' },
-      [['all', 'Все'], ['direct', 'Личные'], ['group', 'Группы'], ['unread', 'Непрочитанные']].map(([k, label]) =>
-        h('button', { class: 'chip', 'data-k': k, 'aria-pressed': String(S.filter === k), onclick: () => {
-          S.filter = k;
-          chips.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.k === k)));
-          renderList();
-        } }, label)));
+    const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Папки' });
     const chatsView = h('div', { class: 'tab-view', 'data-tab': 'chats' },
       h('div', { class: 'side-head' },
         h('div', { class: 'head-row' },
@@ -579,7 +584,10 @@
     const pane = h('main', { class: 'pane' });
     const app = h('div', { class: 'app' }, side, pane);
     root.append(app);
-    S.refs = { app, list, pane, searchInput, side, tabbar, contactsView, callsView, profileView };
+    S.searchOpen = false;
+    S.refs = { app, list, pane, searchInput, side, tabbar, contactsView, callsView, profileView, chips };
+    renderChips();
+    api('/api/me/folders').then((r) => { S.folders = r.folders; renderChips(); renderList(); }).catch(() => {});
     setTab(S.tab || 'chats');
     renderList();
     renderPane();
@@ -759,6 +767,22 @@
     clear(list);
     const qv = S.query.toLowerCase();
     let chats = [...S.chats.values()].sort((a, b) => lastTs(b) - lastTs(a));
+    const archivedAll = chats.filter((c) => c.archived);
+    if (S.filter === 'archive') chats = archivedAll;
+    else if (!qv) chats = chats.filter((c) => !c.archived);
+    if (S.filter.startsWith('f:')) { const f = (S.folders || []).find((x) => 'f:' + x.id === S.filter); chats = chats.filter((c) => f?.chatIds.includes(c.id)); }
+    if (S.filter === 'all' && !qv && archivedAll.length) {
+      const un = archivedAll.reduce((n, c) => n + (c.unread || 0), 0);
+      list.append(h('li', null, h('button', { class: 'chat-item archive-row', onclick: () => { S.filter = 'archive'; renderChips(); renderList(); } },
+        h('span', { class: 'add-ic' }, icon('database', 22, 1.8)),
+        h('div', { class: 'ci-body' }, h('span', { class: 'ci-name' }, 'Архив'),
+          h('span', { class: 'ci-prev' }, archivedAll.map((c) => chatTitle(c)).slice(0, 3).join(', '))),
+        un ? h('span', { class: 'badge muted-badge' }, un) : null)));
+    }
+    if (S.filter === 'archive') {
+      list.append(h('li', null, h('button', { class: 'chat-item archive-row', onclick: () => { S.filter = 'all'; renderChips(); renderList(); } },
+        h('span', { class: 'add-ic' }, icon('back', 22)), h('span', { class: 'ci-name' }, 'Выйти из архива'))));
+    }
     if (S.filter === 'direct' || S.filter === 'group') chats = chats.filter((c) => c.type === S.filter);
     if (S.filter === 'unread') chats = chats.filter((c) => c.unread > 0);
     if (qv) chats = chats.filter((c) => chatTitle(c).toLowerCase().includes(qv) ||
@@ -774,8 +798,9 @@
         if (lm.senderId === S.me.id) prev = 'Вы: ' + prev;
         else if (c.type === 'group') prev = (memberOf(c, lm.senderId)?.displayName.split(' ')[0] || '…') + ': ' + prev;
       }
-      list.append(h('li', null, h('button', {
-        class: 'chat-item', 'aria-current': String(S.active === c.id), onclick: () => openChat(c.id) },
+      const item = h('button', {
+        class: 'chat-item', 'aria-current': String(S.active === c.id), onclick: () => openChat(c.id),
+        oncontextmenu: (e) => { e.preventDefault(); chatMenu(c, e.clientX, e.clientY); } },
       avatar(c, 52),
       h('div', { class: 'ci-body' },
         h('div', { class: 'ci-row' },
@@ -784,8 +809,11 @@
           h('span', { class: 'ci-time' + (c.unread ? ' hot' : '') }, shortTime(lastTs(c)))),
         h('div', { class: 'ci-row' },
           ty ? h('span', { class: 'ci-prev typing' }, dots(), ty) : h('span', { class: 'ci-prev' }, prev),
-          c.unread ? h('span', { class: 'badge', 'aria-label': `${c.unread} непрочитанных` }, c.unread > 99 ? '99+' : c.unread) : null)))));
+          c.unread ? h('span', { class: 'badge', 'aria-label': `${c.unread} непрочитанных` }, c.unread > 99 ? '99+' : c.unread) : null)));
+      longPress(item, (x, y) => chatMenu(c, x, y));
+      list.append(h('li', null, item));
     }
+    if (!qv && S.filter.startsWith('f:') && !chats.length) list.append(h('li', { class: 'list-empty' }, 'В папке пока нет чатов. Нажмите и удерживайте чат в списке → «Добавить в папку».'));
     if (qv && S.people.length) {
       const directIds = new Set([...S.chats.values()].filter((c) => c.type === 'direct').map((c) => other(c)?.id));
       const fresh = S.people.filter((u) => !directIds.has(u.id) || !chats.some((c) => c.type === 'direct' && other(c)?.id === u.id));
@@ -981,11 +1009,14 @@
       msgs.scrollTo({ top: msgs.scrollHeight, behavior: 'smooth' });
     } }, icon('down', 24), downBadge);
     const composer = buildComposer(chat);
-    pane.append(head, keyWarnBox, h('div', { class: 'msgs-wrap' }, msgs, down), composer.el);
-    Object.assign(S.refs, { head, keyWarnBox, msgs, inner, typingRow, composer, down, downBadge });
+    const pinBox = h('div');
+    pane.append(head, pinBox, keyWarnBox, h('div', { class: 'msgs-wrap' }, msgs, down), composer.el);
+    Object.assign(S.refs, { head, keyWarnBox, msgs, inner, typingRow, composer, down, downBadge, pinBox });
+    S.searchQ = ''; S.searchOpen = false;
     pane.style.position = 'relative';
     setupDrop(pane);
     renderHead();
+    renderPinned();
     renderMessages('bottom');
     if (!COARSE) composer.input.focus();
   }
@@ -1090,7 +1121,7 @@
   function renderHead() {
     const chat = S.chats.get(S.active);
     const head = S.refs.head;
-    if (!chat || !head) return;
+    if (!chat || !head || S.searchOpen) return;
     clear(head);
     const st = statusLine(chat);
     head.append(
@@ -1098,7 +1129,8 @@
       h('button', { class: 'head-av', 'aria-label': 'Профиль', onclick: () => openChatPage(chat) }, avatar(chat, 42)),
       h('button', { class: 'head-title', onclick: () => openChatPage(chat) },
         h('b', null, chatTitle(chat)), h('small', { class: st.cls }, st.cls === 'typing' ? dots() : null, st.text)),
-      h('button', { class: 'icon-btn', 'aria-label': 'Код безопасности', title: 'Код безопасности', onclick: () => openInfo(chat.id) }, icon('shield', 22, 1.8)),
+      h('button', { class: 'icon-btn', 'aria-label': 'Поиск по сообщениям', title: 'Поиск', onclick: openSearch }, icon('search', 22, 1.8)),
+      h('button', { class: 'icon-btn hide-sm', 'aria-label': 'Код безопасности', title: 'Код безопасности', onclick: () => openInfo(chat.id) }, icon('shield', 22, 1.8)),
       h('button', { class: 'icon-btn', 'aria-label': chat.type === 'group' ? 'О группе' : 'Профиль собеседника', onclick: () => openChatPage(chat) }, icon('more', 22)));
     const warn = clear(S.refs.keyWarnBox);
     const changed = chat.members.filter((m) => m.id !== S.me.id && keyChanged(m));
@@ -1195,11 +1227,15 @@
     if (showAvatar && firstOfGroup) {
       bubble.append(h('span', { class: 'who', style: `color:${NAME_COLORS[(sender?.color ?? m.senderId) % 8]}` }, senderName));
     }
+    if (p.fwd) bubble.append(h('span', { class: 'fwd' }, icon('forward', 13), 'Переслано от ' + p.fwd));
     if (p.reply) {
       bubble.append(h('button', { class: 'quote', onclick: () => jumpTo(p.reply.id) }, h('b', null, p.reply.name), h('span', null, p.reply.text)));
     }
     if (p.t === 'text') {
-      bubble.append(...linkify(p.text), meta);
+      bubble.append(...highlight(linkify(p.text)), meta);
+    } else if (p.t === 'poll') {
+      bubble.classList.add('poll-b');
+      bubble.append(pollEl(m, p, chat), meta);
     } else if (p.t === 'gift') {
       bubble.classList.add('gift-b');
       bubble.append(giftBubble(m, p, mine, sender), meta);
@@ -1235,6 +1271,8 @@
         p.t === 'text' && ['copy', 'Копировать текст', () => copyText(p.text)],
         p.t === 'file' && ['download', 'Скачать файл', () => downloadFile(p)],
         p.t === 'file' && p.caption && ['copy', 'Копировать подпись', () => copyText(p.caption)],
+        ['forward', 'Переслать', () => forwardMessage(m, p, senderName)],
+        chat.pinned?.id === m.id ? ['pin', 'Открепить', () => pinMessage(chat, null)] : ['pin', 'Закрепить', () => pinMessage(chat, m)],
         mine && p.t === 'text' && ['edit', 'Изменить', () => setEdit(m, p)],
         mine && ['trash', 'Удалить у всех', () => deleteMessage(m, p), 'danger'],
       ].filter(Boolean);
@@ -1422,9 +1460,10 @@
       if (!COARSE) input.focus();
     };
     const attachBtn = h('button', { class: 'icon-btn', style: 'color:var(--muted)', 'aria-label': 'Прикрепить фото или файл', title: 'Прикрепить', onclick: (e) => {
-      if (chat.type !== 'direct') return fileInput.click();
       const r = e.currentTarget.getBoundingClientRect();
-      openMenu(r.left, r.top - 110, [['image', 'Фото или файл', () => fileInput.click()], ['gift', 'Подарок', () => openGiftShop(other(chat))]]);
+      const items = [['image', 'Фото или файл', () => fileInput.click()], ['poll', 'Опрос', () => openPollEditor(chat)]];
+      if (chat.type === 'direct') items.push(['gift', 'Подарок', () => openGiftShop(other(chat))]);
+      openMenu(r.left, r.top - 160, items);
     } }, icon('attach', 24, 1.8));
     const EMOJI = '😀 😂 🥹 😊 😍 🥰 😘 😎 🤔 😅 😭 😡 🥳 😴 🤗 🙃 👍 👎 👏 🙏 💪 🤝 👋 ✌️ ❤️ 💙 💚 🔥 ✨ 🎉 💯 ✅ ❌ ⚡ 🌙 ☀️ 🌧 🍕 ☕ 🎁 🐱 🐶 🌲 🏔 🚗 ✈️ 📍 ⏰'.split(' ');
     const emojiPanel = h('div', { class: 'emoji-panel', hidden: true, role: 'dialog', 'aria-label': 'Эмодзи' }, EMOJI.map((e) =>
@@ -1741,6 +1780,7 @@
       if (old && S.active === d.chat.id) { d.chat.unread = 0; }
       if (old && old.members.length !== d.chat.members.length) S.userKeys.clear();
       if (S.active === d.chat.id) {
+        renderPinned();
         const box = S.msgs.get(d.chat.id);
         if (box && d.chat.lastMessage && !box.list.some((m) => m.id === d.chat.lastMessage.id)) box.list = mergeList(box.list, [d.chat.lastMessage]);
         renderHead(); renderMessages();
@@ -1749,6 +1789,11 @@
       return;
     }
     if (d.type === 'messageUpdated') return applyUpdated(d.message);
+    if (d.type === 'votes') {
+      const m = S.msgs.get(d.chatId)?.list.find((x) => x.id === d.messageId);
+      if (m) { m.votes = d.votes; if (S.active === d.chatId) renderMessages('keep'); }
+      return;
+    }
     if (d.type === 'wallet') { S.wallet = { ...(S.wallet || {}), ...d.wallet }; if (S.tab === 'profile') renderProfileTab(); return; }
     if (d.type === 'reactions') return applyReactions(d.chatId, d.messageId, d.reactions);
     if (d.type === 'chatRemoved') {
@@ -2172,6 +2217,258 @@
       try { await api('/api/2fa/disable', { body: { code: code.value } }); close(); toast('Двухфакторная защита отключена'); }
       catch (e) { err.textContent = e.message; btn.disabled = false; }
     });
+  }
+
+  /* ================= ПАПКИ И АРХИВ ================= */
+  function renderChips() {
+    const box = S.refs.chips;
+    if (!box) return;
+    clear(box);
+    const base = [['all', 'Все'], ['direct', 'Личные'], ['group', 'Группы'], ['unread', 'Непрочитанные']];
+    const items = base.concat((S.folders || []).map((f) => ['f:' + f.id, f.name]));
+    if (S.filter === 'archive') items.push(['archive', 'Архив']);
+    for (const [k, label] of items) {
+      const chip = h('button', { class: 'chip', 'aria-pressed': String(S.filter === k), onclick: () => { S.filter = k; renderChips(); renderList(); } }, label);
+      if (k.startsWith('f:')) {
+        const f = S.folders.find((x) => 'f:' + x.id === k);
+        const menu = (x, y) => openMenu(x, y, [['edit', 'Изменить папку', () => editFolder(f)], ['trash', 'Удалить папку', () => deleteFolder(f), 'danger']]);
+        chip.addEventListener('contextmenu', (e) => { e.preventDefault(); menu(e.clientX, e.clientY); });
+        longPress(chip, (x, y) => menu(x, y));
+      }
+      box.append(chip);
+    }
+    requestAnimationFrame(() => box.querySelector('[aria-pressed="true"]')?.scrollIntoView({ inline: 'nearest', block: 'nearest' }));
+    box.append(h('button', { class: 'chip add-chip', 'aria-label': 'Новая папка', title: 'Новая папка', onclick: () => editFolder(null) }, icon('plus', 16, 2.4)));
+  }
+  function longPress(el, fn) {
+    let t, sx = 0, sy = 0;
+    el.addEventListener('touchstart', (e) => { sx = e.touches[0].clientX; sy = e.touches[0].clientY; t = setTimeout(() => { navigator.vibrate?.(12); fn(sx, sy); }, 450); }, { passive: true });
+    el.addEventListener('touchmove', (e) => { if (Math.abs(e.touches[0].clientX - sx) > 8 || Math.abs(e.touches[0].clientY - sy) > 8) clearTimeout(t); }, { passive: true });
+    ['touchend', 'touchcancel'].forEach((ev) => el.addEventListener(ev, () => clearTimeout(t), { passive: true }));
+  }
+  async function saveFolders(folders) {
+    const r = await api('/api/me/folders', { method: 'PUT', body: { folders } });
+    S.folders = r.folders;
+    renderChips(); renderList();
+  }
+  function editFolder(f) {
+    const name = h('input', { class: 'input', value: f?.name || '', maxlength: 24, placeholder: 'Например: Работа' });
+    const picked = new Set(f?.chatIds || []);
+    const list = h('div', { class: 'card' });
+    const draw = () => {
+      clear(list);
+      for (const c of [...S.chats.values()].sort((a, b) => lastTs(b) - lastTs(a))) {
+        const on = picked.has(c.id);
+        list.append(h('button', { class: 'card-row', onclick: () => { on ? picked.delete(c.id) : picked.add(c.id); draw(); } },
+          avatar(c, 36), h('span', { class: 'grow' }, h('b', null, chatTitle(c))),
+          h('span', { class: 'check' + (on ? ' on' : '') }, on ? icon('check', 14, 3) : null)));
+      }
+      if (!S.chats.size) list.append(h('div', { class: 'card-row muted' }, 'Пока нет чатов'));
+    };
+    draw();
+    const close = modal(f ? 'Папка' : 'Новая папка', [
+      h('label', { class: 'field-label' }, 'Название', name),
+      h('div', { class: 'section-title' }, 'Чаты в папке'), list,
+      h('button', { class: 'btn block', onclick: async () => {
+        if (!name.value.trim()) { toast('Введите название папки'); return; }
+        const folders = (S.folders || []).filter((x) => x.id !== f?.id);
+        const id = f?.id || 'f' + Date.now().toString(36);
+        const idx = f ? S.folders.findIndex((x) => x.id === f.id) : folders.length;
+        folders.splice(idx < 0 ? folders.length : idx, 0, { id, name: name.value.trim(), chatIds: [...picked] });
+        try { await saveFolders(folders); S.filter = 'f:' + id; renderChips(); renderList(); close(); } catch (e) { toast(e.message); }
+      } }, 'Сохранить'),
+    ]);
+    setTimeout(() => name.focus(), 40);
+  }
+  async function deleteFolder(f) {
+    if (!confirm(`Удалить папку «${f.name}»? Чаты останутся.`)) return;
+    if (S.filter === 'f:' + f.id) S.filter = 'all';
+    try { await saveFolders(S.folders.filter((x) => x.id !== f.id)); } catch (e) { toast(e.message); }
+  }
+  async function setArchived(c, archived) {
+    try {
+      await api(`/api/chats/${c.id}/archive`, { body: { archived } });
+      c.archived = archived;
+      if (!archived && S.filter === 'archive' && ![...S.chats.values()].some((x) => x.archived)) S.filter = 'all';
+      renderChips(); renderList(); toast(archived ? 'Чат в архиве' : 'Чат возвращён из архива');
+    } catch (e) { toast(e.message); }
+  }
+  function chatMenu(c, x, y) {
+    const folders = S.folders || [];
+    openMenu(x, y, [
+      c.archived ? ['leave', 'Вернуть из архива', () => setArchived(c, false)] : ['database', 'В архив', () => setArchived(c, true)],
+      ['plus', folders.length ? 'Добавить в папку…' : 'Создать папку с этим чатом', () => {
+        if (!folders.length) return editFolder({ id: null, name: '', chatIds: [c.id] });
+        const close = modal('В папку', [h('div', { class: 'card' }, folders.map((f) => {
+          const on = f.chatIds.includes(c.id);
+          return h('button', { class: 'card-row', onclick: async () => {
+            const next = folders.map((x) => x.id !== f.id ? x : { ...x, chatIds: on ? x.chatIds.filter((i) => i !== c.id) : [...x.chatIds, c.id] });
+            try { await saveFolders(next); close(); toast(on ? `Убрано из «${f.name}»` : `Добавлено в «${f.name}»`); } catch (e) { toast(e.message); }
+          } }, h('span', { class: 'ic' }, icon('files', 18)), h('span', { class: 'grow' }, h('b', null, f.name)),
+          h('span', { class: 'check' + (on ? ' on' : '') }, on ? icon('check', 14, 3) : null));
+        }))]);
+      }],
+    ]);
+  }
+
+  /* ================= ЗАКРЕП, ПОИСК, ПЕРЕСЫЛКА, ОПРОСЫ ================= */
+  function renderPinned() {
+    const chat = S.chats.get(S.active);
+    const box = S.refs.pinBox;
+    if (!box || !chat) return;
+    clear(box);
+    const pm = chat.pinned;
+    if (!pm) return;
+    const p = plainOf(pm);
+    if (!p && pm.kind === 'msg') { decryptMsg(pm, chat).then(() => renderPinned()); return; }
+    box.append(h('div', { class: 'pin-bar' },
+      h('button', { class: 'pin-main', onclick: () => jumpTo(pm.id) }, icon('pin', 18),
+        h('span', null, h('small', null, 'Закреплённое сообщение'), h('b', null, previewOf(p)))),
+      h('button', { class: 'icon-btn', 'aria-label': 'Открепить', onclick: () => pinMessage(chat, null) }, icon('close', 18))));
+  }
+  async function pinMessage(chat, m) {
+    try { const { chat: c } = await api(`/api/chats/${chat.id}/pin`, { body: { messageId: m ? m.id : null } }); S.chats.set(c.id, { ...S.chats.get(c.id), ...c }); renderPinned(); }
+    catch (e) { toast(e.message); }
+  }
+
+  /* Поиск по сообщениям открытого чата (по расшифрованному на устройстве) */
+  function openSearch() {
+    const chat = S.chats.get(S.active);
+    const head = S.refs.head;
+    if (!chat || !head) return;
+    let hits = [], pos = -1;
+    const input = h('input', { type: 'search', class: 'search-input', placeholder: 'Поиск в чате', 'aria-label': 'Поиск по сообщениям' });
+    const counter = h('span', { class: 'search-count muted' });
+    const go = (i) => {
+      if (!hits.length) return;
+      pos = (i + hits.length) % hits.length;
+      counter.textContent = `${pos + 1} из ${hits.length}`;
+      jumpTo(hits[pos]);
+    };
+    const run = async (deep) => {
+      const qv = input.value.trim().toLowerCase();
+      S.searchQ = qv;
+      if (!qv) { hits = []; counter.textContent = ''; renderMessages(); return; }
+      if (deep) {
+        counter.textContent = 'Ищу во всей истории…';
+        let guard = 0;
+        while (S.msgs.get(chat.id)?.hasMore && guard++ < 40) await loadMessages(chat.id, true);
+      }
+      const box = S.msgs.get(chat.id);
+      hits = (box?.list || []).filter((m) => {
+        const p = plainOf(m);
+        const t = p?.t === 'text' ? p.text : p?.t === 'file' ? `${p.name} ${p.caption}` : p?.t === 'poll' ? `${p.question} ${p.options.join(' ')}` : '';
+        return t.toLowerCase().includes(qv);
+      }).map((m) => m.id).reverse();
+      renderMessages('keep');
+      counter.textContent = hits.length ? `1 из ${hits.length}` : (box?.hasMore ? '' : 'Не найдено');
+      if (hits.length) go(0);
+      else if (box?.hasMore && !deep) { clear(counter).append(h('button', { class: 'link', onclick: () => run(true) }, 'Искать во всей истории')); }
+    };
+    let t;
+    input.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => run(false), 250); });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(pos + 1); } if (e.key === 'Escape') close(); });
+    const close = () => { S.searchQ = ''; S.searchOpen = false; renderHead(); renderMessages('keep'); };
+    S.searchOpen = true;
+    clear(head).append(
+      h('button', { class: 'icon-btn', 'aria-label': 'Закрыть поиск', onclick: close }, icon('back', 24)),
+      h('div', { class: 'search search-in-chat' }, icon('search', 18), input), counter,
+      h('button', { class: 'icon-btn', 'aria-label': 'Предыдущее совпадение', onclick: () => go(pos + 1) }, icon('up', 22)),
+      h('button', { class: 'icon-btn', 'aria-label': 'Следующее совпадение', onclick: () => go(pos - 1) }, icon('down', 22)));
+    input.focus();
+  }
+  function highlight(nodes) {
+    const qv = S.searchQ;
+    if (!qv) return nodes;
+    const out = [];
+    for (const n of nodes) {
+      if (typeof n !== 'string') { out.push(n); continue; }
+      const low = n.toLowerCase();
+      let i = 0, j;
+      while ((j = low.indexOf(qv, i)) >= 0) { if (j > i) out.push(n.slice(i, j)); out.push(h('mark', null, n.slice(j, j + qv.length))); i = j + qv.length; }
+      if (i < n.length) out.push(n.slice(i));
+    }
+    return out;
+  }
+
+  /* Пересылка: сообщение заново шифруется для участников другого чата */
+  function forwardMessage(m, p, fromName) {
+    const chats = [...S.chats.values()].sort((a, b) => lastTs(b) - lastTs(a));
+    const close = modal('Переслать', [h('div', { class: 'card' }, chats.map((c) => h('button', { class: 'card-row', onclick: async () => {
+      close();
+      try {
+        const payload = { ...p, fwd: p.fwd || fromName };
+        delete payload.reply;
+        if (p.t === 'file') await api(`/api/files/${p.fileId}/share`, { body: { chatId: c.id } });
+        await sendPayload(payload, c.id);
+        toast(`Переслано: ${chatTitle(c)}`);
+      } catch (e) { toast('Не удалось переслать: ' + e.message); }
+    } }, avatar(c, 40), h('span', { class: 'grow' }, h('b', null, chatTitle(c)), h('small', null, c.type === 'group' ? 'Группа' : '@' + (other(c)?.username || ''))))))]);
+  }
+
+  /* Опросы */
+  function openPollEditor(chat) {
+    const question = h('input', { class: 'input', maxlength: 200, placeholder: 'Например: Куда идём в субботу?' });
+    const box = h('div', { class: 'poll-opts' });
+    const multiple = h('button', { class: 'sw', role: 'switch', 'aria-checked': 'false', 'aria-label': 'Несколько ответов',
+      onclick: () => multiple.setAttribute('aria-checked', String(multiple.getAttribute('aria-checked') !== 'true')) });
+    const addOpt = (val = '') => {
+      if (box.children.length >= 10) return;
+      const inp = h('input', { class: 'input', maxlength: 100, placeholder: `Вариант ${box.children.length + 1}`, value: val });
+      const row = h('div', { class: 'poll-opt-row' }, inp, h('button', { class: 'icon-btn', 'aria-label': 'Убрать вариант', onclick: () => { if (box.children.length > 2) row.remove(); } }, icon('close', 18)));
+      box.append(row);
+      return inp;
+    };
+    addOpt(); addOpt();
+    const close = modal('Новый опрос', [
+      h('label', { class: 'field-label' }, 'Вопрос', question),
+      h('div', { class: 'field-label' }, 'Варианты ответа', box,
+        h('button', { class: 'btn ghost', onclick: () => addOpt()?.focus() }, icon('plus', 18), 'Добавить вариант')),
+      h('div', { class: 'card' }, h('div', { class: 'card-row' }, h('span', { class: 'grow' }, h('b', null, 'Несколько ответов'), h('small', null, 'Можно выбрать больше одного варианта')), multiple)),
+      h('button', { class: 'btn block big', onclick: () => {
+        const opts = [...box.querySelectorAll('input')].map((i) => i.value.trim()).filter(Boolean);
+        if (!question.value.trim()) return toast('Напишите вопрос');
+        if (opts.length < 2) return toast('Нужно минимум два варианта');
+        close();
+        sendPayload({ t: 'poll', question: question.value.trim(), options: opts, multiple: multiple.getAttribute('aria-checked') === 'true' }, chat.id);
+      } }, 'Отправить опрос'),
+    ]);
+    setTimeout(() => question.focus(), 40);
+  }
+  function pollEl(m, p, chat) {
+    const votes = m.votes || {};
+    const voters = new Set(Object.values(votes).flat());
+    const total = voters.size;
+    const mineSet = new Set(Object.entries(votes).filter(([, ids]) => ids.includes(S.me.id)).map(([k]) => Number(k)));
+    const voted = mineSet.size > 0;
+    const sel = new Set(mineSet);
+    const submit = h('button', { class: 'btn poll-submit', hidden: !p.multiple || voted }, 'Голосовать');
+    const send = async (options) => {
+      try { const r = await api(`/api/messages/${m.id}/vote`, { body: { options } }); m.votes = r.votes; renderMessages('keep'); } catch (e) { toast(e.message); }
+    };
+    const rows = p.options.map((label, i) => {
+      const n = (votes[i] || []).length;
+      const pct = total ? Math.round((n / total) * 100) : 0;
+      const names = (votes[i] || []).map((id) => memberOf(chat, id)?.displayName || '…').join(', ');
+      const b = h('button', { class: 'poll-row' + (mineSet.has(i) ? ' mine' : ''), title: names, onclick: () => {
+        if (voted) return;
+        if (!p.multiple) return send([i]);
+        sel.has(i) ? sel.delete(i) : sel.add(i);
+        b.classList.toggle('picked', sel.has(i));
+      } },
+      h('span', { class: 'poll-fill', style: `width:${voted ? pct : 0}%` }),
+      h('span', { class: 'poll-mark' }, mineSet.has(i) ? icon('check', 14, 3) : null),
+      h('span', { class: 'poll-label' }, label),
+      voted ? h('span', { class: 'poll-pct' }, pct + '%') : null);
+      return b;
+    });
+    submit.addEventListener('click', () => sel.size && send([...sel]));
+    return h('div', { class: 'poll' },
+      h('b', { class: 'poll-q' }, p.question),
+      h('small', { class: 'poll-kind' }, p.multiple ? 'Опрос · несколько ответов' : 'Опрос'),
+      ...rows, submit,
+      h('div', { class: 'poll-foot' }, h('span', null, total ? `${total} ${plural(total, 'голос', 'голоса', 'голосов')}` : 'Пока никто не голосовал'),
+        voted ? h('button', { class: 'link', onclick: () => send([]) }, 'Отменить голос') : null));
   }
 
   /* ================= ПОДАРКИ И ЗВЁЗДЫ ================= */

@@ -99,6 +99,20 @@ CREATE TABLE IF NOT EXISTS files (
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google ON users(google_sub) WHERE google_sub IS NOT NULL');
   const mcols = new Set(db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name));
   if (!mcols.has('edited_at')) db.exec('ALTER TABLE messages ADD COLUMN edited_at INTEGER');
+  const ccols = new Set(db.prepare('PRAGMA table_info(chats)').all().map((c) => c.name));
+  if (!ccols.has('pinned_id')) db.exec('ALTER TABLE chats ADD COLUMN pinned_id INTEGER');
+  const mbcols = new Set(db.prepare('PRAGMA table_info(members)').all().map((c) => c.name));
+  if (!mbcols.has('archived')) db.exec('ALTER TABLE members ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
+  if (!cols.has('folders')) db.exec("ALTER TABLE users ADD COLUMN folders TEXT NOT NULL DEFAULT '[]'");
+  db.exec(`CREATE TABLE IF NOT EXISTS poll_votes (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    option INTEGER NOT NULL,
+    PRIMARY KEY (message_id, user_id, option));
+  CREATE TABLE IF NOT EXISTS file_access (
+    file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    PRIMARY KEY (file_id, chat_id));`);
   db.exec(`CREATE TABLE IF NOT EXISTS reactions (
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -134,7 +148,7 @@ const q = {
   chatMembers: db.prepare(`SELECT u.id, u.username, u.display_name, u.public_key, u.color, u.bio, u.avatar, u.last_seen, m.last_read_id
                            FROM members m JOIN users u ON u.id = m.user_id WHERE m.chat_id = ? ORDER BY u.id`),
   memberIds: db.prepare('SELECT user_id FROM members WHERE chat_id = ?'),
-  myChats: db.prepare(`SELECT c.*, m.last_read_id,
+  myChats: db.prepare(`SELECT c.*, m.last_read_id, m.archived,
                          (SELECT MAX(id) FROM messages WHERE chat_id = c.id) AS last_id,
                          (SELECT COUNT(*) FROM messages WHERE chat_id = c.id AND id > m.last_read_id
                             AND (sender_id IS NULL OR sender_id != m.user_id)) AS unread
@@ -265,10 +279,15 @@ function reactionsFor(ids) {
   return out;
 }
 const reactionList = (map) => (map ? [...map].map(([emoji, users]) => ({ emoji, users })) : []);
+function pollVotes(messageId) {
+  const out = {};
+  for (const r of db.prepare('SELECT option, user_id FROM poll_votes WHERE message_id = ? ORDER BY rowid').all(messageId)) (out[r.option] ||= []).push(r.user_id);
+  return out;
+}
 const messageView = (m, reactions) => ({
   id: m.id, chatId: m.chat_id, senderId: m.sender_id, kind: m.kind,
   body: JSON.parse(m.body), createdAt: m.created_at, editedAt: m.edited_at || null,
-  reactions: reactionList(reactions),
+  reactions: reactionList(reactions), votes: pollVotes(m.id),
 });
 
 function chatView(chat, userId) {
@@ -277,6 +296,8 @@ function chatView(chat, userId) {
   return {
     id: chat.id, type: chat.type, title: chat.title, createdAt: chat.created_at,
     members, lastMessage: last ? messageView(last) : null,
+    pinned: chat.pinned_id ? (() => { const pm = q.messageById.get(chat.pinned_id); return pm && pm.kind !== 'deleted' ? messageView(pm) : null; })() : null,
+    archived: !!chat.archived,
     unread: chat.unread ?? 0, lastReadId: chat.last_read_id ?? members.find((m) => m.id === userId)?.lastReadId ?? 0,
   };
 }
@@ -719,6 +740,63 @@ app.post('/api/messages/:id/react', auth, json, (req, res) => {
   res.json({ reactions });
 });
 
+/* Пересылка файла в другой чат: даём участникам того чата доступ к тем же зашифрованным байтам */
+app.post('/api/files/:id/share', auth, json, (req, res) => {
+  const f = q.fileById.get(String(req.params.id));
+  const target = Number(req.body?.chatId);
+  const canRead = f && (q.isMember.get(f.chat_id, req.user.id) ||
+    db.prepare('SELECT 1 FROM file_access fa JOIN members m ON m.chat_id = fa.chat_id WHERE fa.file_id = ? AND m.user_id = ?').get(f.id, req.user.id));
+  if (!canRead || !q.isMember.get(target, req.user.id)) return fail(res, 404, 'Файл не найден');
+  db.prepare('INSERT OR IGNORE INTO file_access (file_id, chat_id) VALUES (?, ?)').run(f.id, target);
+  res.json({ ok: true });
+});
+
+/* Закреплённое сообщение */
+app.post('/api/chats/:id/pin', auth, json, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  const mid = req.body?.messageId ? Number(req.body.messageId) : null;
+  if (mid) { const m = q.messageById.get(mid); if (!m || m.chat_id !== chat.id || m.kind === 'deleted') return fail(res, 404, 'Сообщение не найдено'); }
+  db.prepare('UPDATE chats SET pinned_id = ? WHERE id = ?').run(mid, chat.id);
+  const sys = addSystem(chat.id, mid ? `${req.user.display_name} закрепил(а) сообщение` : `${req.user.display_name} открепил(а) сообщение`);
+  for (const { user_id } of q.memberIds.all(chat.id)) sendTo(user_id, { type: 'message', message: messageView(sys) });
+  broadcastChat(chat.id);
+  res.json({ chat: fullChat(chat.id, req.user.id) });
+});
+
+/* Архив — личная настройка каждого участника */
+app.post('/api/chats/:id/archive', auth, json, (req, res) => {
+  const chat = requireMember(req, res); if (!chat) return;
+  db.prepare('UPDATE members SET archived = ? WHERE chat_id = ? AND user_id = ?').run(req.body?.archived ? 1 : 0, chat.id, req.user.id);
+  res.json({ chat: fullChat(chat.id, req.user.id) });
+});
+
+/* Папки чатов */
+app.get('/api/me/folders', auth, (req, res) => res.json({ folders: JSON.parse(q.userById.get(req.user.id).folders || '[]') }));
+app.put('/api/me/folders', auth, json, (req, res) => {
+  const list = Array.isArray(req.body?.folders) ? req.body.folders.slice(0, 20) : [];
+  const clean = list.map((f, i) => ({
+    id: String(f.id || 'f' + i).replace(/[^a-z0-9_-]/gi, '').slice(0, 24) || 'f' + i,
+    name: cleanName(f.name).slice(0, 24) || 'Папка',
+    chatIds: Array.isArray(f.chatIds) ? [...new Set(f.chatIds.map(Number).filter((n) => q.isMember.get(n, req.user.id)))].slice(0, 500) : [],
+  }));
+  db.prepare('UPDATE users SET folders = ? WHERE id = ?').run(JSON.stringify(clean), req.user.id);
+  res.json({ folders: clean });
+});
+
+/* Голосование в опросе (вопрос и варианты зашифрованы, сервер знает только номера вариантов) */
+app.post('/api/messages/:id/vote', auth, json, (req, res) => {
+  const m = q.messageById.get(Number(req.params.id));
+  if (!m || m.kind !== 'msg' || !q.isMember.get(m.chat_id, req.user.id)) return fail(res, 404, 'Опрос не найден');
+  const opts = Array.isArray(req.body?.options) ? [...new Set(req.body.options.map(Number))].filter((n) => Number.isInteger(n) && n >= 0 && n < 12) : [];
+  db.transaction(() => {
+    db.prepare('DELETE FROM poll_votes WHERE message_id = ? AND user_id = ?').run(m.id, req.user.id);
+    for (const o of opts) db.prepare('INSERT INTO poll_votes (message_id, user_id, option) VALUES (?, ?, ?)').run(m.id, req.user.id, o);
+  })();
+  const votes = pollVotes(m.id);
+  for (const { user_id } of q.memberIds.all(m.chat_id)) sendTo(user_id, { type: 'votes', chatId: m.chat_id, messageId: m.id, votes });
+  res.json({ votes });
+});
+
 app.post('/api/chats/:id/read', auth, json, (req, res) => {
   const chat = requireMember(req, res); if (!chat) return;
   const id = Number(req.body?.messageId) || 0;
@@ -742,7 +820,8 @@ app.get('/api/files/:id', auth, (req, res) => {
   const id = String(req.params.id);
   if (!/^[a-f0-9]{32}$/.test(id)) return fail(res, 404, 'Файл не найден');
   const f = q.fileById.get(id);
-  if (!f || !q.isMember.get(f.chat_id, req.user.id)) return fail(res, 404, 'Файл не найден');
+  const shared = f && db.prepare('SELECT 1 FROM file_access fa JOIN members m ON m.chat_id = fa.chat_id WHERE fa.file_id = ? AND m.user_id = ?').get(id, req.user.id);
+  if (!f || (!q.isMember.get(f.chat_id, req.user.id) && !shared)) return fail(res, 404, 'Файл не найден');
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
   fs.createReadStream(path.join(FILES_DIR, id)).pipe(res);

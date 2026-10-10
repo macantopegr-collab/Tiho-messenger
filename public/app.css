@@ -603,3 +603,41 @@ svg{display:block;flex:none}
 .gift-msg b{font-size:15px;line-height:1.35}
 .gift-open{height:38px;font-size:14px;width:100%}
 .out .gift-open{background:var(--out-quote);color:var(--out-text)}
+
+/* =================== v6: папки, архив, закреп, поиск, опросы =================== */
+.add-chip{display:flex;align-items:center;justify-content:center;padding:0 10px;color:var(--accent)}
+.archive-row .ci-name{color:var(--text)}
+.muted-badge{background:var(--chip-border);color:var(--text-2)}
+.pin-bar{display:flex;align-items:center;gap:4px;padding:0 6px 0 4px;background:var(--surface);border-bottom:1px solid var(--border);flex:none}
+.pin-main{flex:1;min-width:0;display:flex;align-items:center;gap:10px;border:0;background:transparent;padding:8px 10px;text-align:left;color:var(--accent)}
+.pin-main span{min-width:0;display:flex;flex-direction:column}
+.pin-main small{font-size:12px;font-weight:600}
+.pin-main b{font-size:14px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.search-in-chat{flex:1;height:40px}
+.search-in-chat input{width:100%}
+.search-count{font-size:13px;white-space:nowrap;padding:0 4px}
+mark{background:#FFD34D;color:#141413;border-radius:3px;padding:0 1px}
+.fwd{display:flex;align-items:center;gap:4px;font-size:12px;font-weight:600;color:var(--accent);margin-bottom:3px;white-space:normal}
+.out .fwd{color:var(--out-check)}
+@media (max-width:420px){.hide-sm{display:none}}
+.bubble.poll-b{min-width:260px;white-space:normal}
+.poll{display:flex;flex-direction:column;gap:6px}
+.poll-q{font-size:15px}
+.poll-kind{font-size:12px;color:var(--muted);margin-bottom:2px}
+.out .poll-kind{color:var(--out-meta)}
+.poll-row{position:relative;overflow:hidden;display:flex;align-items:center;gap:10px;min-height:42px;padding:8px 12px;border-radius:12px;border:1px solid var(--chip-border);background:transparent;color:inherit;text-align:left;font-size:14px}
+.out .poll-row{border-color:var(--out-quote)}
+.poll-row.picked{border-color:var(--accent)}
+.poll-fill{position:absolute;inset:0 auto 0 0;background:var(--accent-soft);transition:width .4s;z-index:0}
+.out .poll-fill{background:var(--out-quote)}
+.poll-row>*:not(.poll-fill){position:relative;z-index:1}
+.poll-mark{width:20px;height:20px;border-radius:10px;border:2px solid var(--chip-border);display:flex;align-items:center;justify-content:center;flex:none;color:var(--on-accent)}
+.poll-row.mine .poll-mark,.poll-row.picked .poll-mark{background:var(--accent);border-color:var(--accent)}
+.poll-label{flex:1}
+.poll-pct{font-weight:700;font-size:13px}
+.poll-submit{height:38px;font-size:14px}
+.poll-foot{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted)}
+.out .poll-foot{color:var(--out-meta)}
+.poll-opts{display:flex;flex-direction:column;gap:8px}
+.poll-opt-row{display:flex;gap:6px;align-items:center}
+[hidden]{display:none!important}
