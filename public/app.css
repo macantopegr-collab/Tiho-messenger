@@ -763,3 +763,29 @@ mark{background:#FFD34D;color:#141413;border-radius:3px;padding:0 1px}
 .report-comment{margin:0;font-size:13px}
 .report-actions{display:flex;gap:8px;flex-wrap:wrap}
 .report-actions .btn{height:34px;padding:0 12px;font-size:13px}
+
+/* ---------- v12: видеокружки ---------- */
+.round-btn{color:var(--muted);flex:none}
+.round-rec{position:fixed;inset:0;z-index:300;background:rgba(5,10,8,.88);backdrop-filter:blur(6px);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;padding:24px}
+.round-stage{position:relative;width:min(280px,72vw);aspect-ratio:1}
+.round-stage .round-live{width:100%;height:100%;border-radius:50%;object-fit:cover;background:#000;display:block}
+.round-stage.mirror .round-live{transform:scaleX(-1)}
+.round-stage .round-ring{position:absolute;inset:-8px;width:calc(100% + 16px);height:calc(100% + 16px)}
+.round-ring circle{stroke:var(--accent)}
+.round-info{display:flex;align-items:center;gap:6px;color:#fff;font-variant-numeric:tabular-nums;font-size:16px}
+.round-ctrl{display:flex;align-items:center;gap:28px}
+.round-ctrl .icon-btn{color:#fff;width:52px;height:52px;background:rgba(255,255,255,.12);border-radius:50%}
+.round-ctrl .send{width:60px;height:60px}
+.bubble.round-b{background:none!important;box-shadow:none!important;padding:0!important;display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+.in .bubble.round-b{align-items:flex-start}
+.bubble.round-b .meta{background:rgba(0,0,0,.45);color:#fff;padding:2px 8px;border-radius:10px;position:static;float:none;margin:0}
+.round{position:relative;width:220px;height:220px;max-width:62vw;max-height:62vw;border-radius:50%;padding:0;border:0;cursor:pointer;background:var(--quote-in);overflow:visible;display:block}
+.round-poster,.round-video{position:absolute;inset:0;width:100%;height:100%;border-radius:50%;object-fit:cover;display:block}
+.round-poster.ph{background:var(--quote-in)}
+.round-video{opacity:0;transition:opacity .2s}
+.round.playing .round-video{opacity:1}
+.round .round-ring{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.round:not(.playing) .round-ring{opacity:0}
+.round-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:56px;height:56px;border-radius:50%;background:rgba(0,0,0,.45);color:#fff;display:flex;align-items:center;justify-content:center}
+.round-play:empty{display:none}
+.round-dur{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);background:rgba(0,0,0,.5);color:#fff;font-size:12px;padding:2px 8px;border-radius:10px;font-variant-numeric:tabular-nums}

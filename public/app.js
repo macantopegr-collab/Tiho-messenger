@@ -72,6 +72,8 @@
     arrowUp: '<path d="M7 17 17 7M8 7h9v9"/>',
     arrowDown: '<path d="M17 7 7 17M16 17H7V8"/>',
     chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>',
+    circleVideo: '<circle cx="12" cy="12" r="9"/><path d="M10 9v6l5-3Z" fill="currentColor"/>',
+    flip: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"/><path d="M9.5 13.5a2.5 2.5 0 0 0 4.6 1.3M14.5 12.5a2.5 2.5 0 0 0-4.6-1.3M14.5 15.5v-2h-2M9.5 10.5v2h2"/>',
     flag: '<path d="M5 21V4h11l-1.5 4L16 12H5"/>',
     block: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
     devices: '<rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M6 18h6"/><rect x="17" y="8" width="5" height="12" rx="1.2"/>',
@@ -241,7 +243,8 @@
     if (p.t === 'file') {
       return { t: 'file', fileId: str(p.fileId, 32), name: str(p.name, 200) || 'файл', size: Number(p.size) || 0,
         mime: str(p.mime, 100), key: str(p.key, 64), iv: str(p.iv, 32), w: Number(p.w) || 0, h: Number(p.h) || 0,
-        caption: str(p.caption, 4000), reply, fwd, gif: !!p.gif,
+        caption: str(p.caption, 4000), reply, fwd, gif: !!p.gif, round: !!p.round,
+        thumb: /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(str(p.thumb, 30000)) ? p.thumb : '',
         dur: Math.max(0, Math.min(600, Number(p.dur) || 0)),
         wave: Array.isArray(p.wave) ? p.wave.slice(0, 64).map((v) => Math.max(0, Math.min(1, Number(v) || 0))) : null };
     }
@@ -271,6 +274,7 @@
   function previewOf(p) {
     if (!p) return '…';
     if (p.t === 'text') return p.text.replace(/\s+/g, ' ');
+    if (p.t === 'file' && p.round) return 'Видеосообщение';
     if (p.t === 'file') return (isGif(p) ? 'GIF' : p.mime.startsWith('image/') ? 'Фото' : p.mime.startsWith('audio/') && p.wave ? 'Голосовое сообщение' : 'Файл: ' + p.name) + (p.caption ? ' · ' + p.caption : '');
     if (p.t === 'system') return p.text;
     if (p.t === 'deleted') return 'Сообщение удалено';
@@ -1141,7 +1145,7 @@
       if (!p) continue;
       if (p.t === 'file') {
         if (p.mime.startsWith('image/')) out.images.push(p);
-        else if (!(p.mime.startsWith('audio/') && p.wave)) out.files.push(p);
+        else if (!(p.mime.startsWith('audio/') && p.wave) && !p.round) out.files.push(p);
       }
       const text = p.t === 'text' ? p.text : p.t === 'file' ? p.caption : '';
       for (const u of (text || '').match(URL_RE) || []) out.links.push(u);
@@ -1372,6 +1376,9 @@
     } else if (p.t === 'deleted') {
       bubble.classList.add('bad');
       bubble.append(h('span', { class: 'del' }, icon('trash', 15, 1.8), 'Сообщение удалено'), meta);
+    } else if (p.t === 'file' && p.round) {
+      bubble.classList.add('round-b');
+      bubble.append(roundEl(p), meta);
     } else if (p.t === 'file') {
       bubble.classList.add('media');
       if (p.mime.startsWith('audio/') && p.wave) bubble.classList.add('voice-b');
@@ -1527,6 +1534,121 @@
     return h('div', { class: 'voice' + (mine ? ' mine' : '') }, btn, h('div', { class: 'vmid' }, wave, time));
   }
 
+  /* ---------- Видеокружки ---------- */
+  const fmtSec = (t) => Math.floor(t / 60) + ':' + pad(Math.floor(t % 60));
+  function ringSvg(size, r) {
+    const t = document.createElement('template');
+    t.innerHTML = `<svg class="round-ring" viewBox="0 0 ${size} ${size}" aria-hidden="true"><circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke-width="4" stroke-linecap="round" stroke-dasharray="${2 * Math.PI * r}" stroke-dashoffset="${2 * Math.PI * r}" transform="rotate(-90 ${size / 2} ${size / 2})"/></svg>`;
+    const svg = t.content.firstChild;
+    const c = svg.querySelector('circle');
+    svg.set = (frac) => c.setAttribute('stroke-dashoffset', String(2 * Math.PI * r * (1 - Math.max(0, Math.min(1, frac)))));
+    return svg;
+  }
+  async function recordRound(chatId) {
+    if (S.roundRec) return;
+    const MAX = 60, SIDE = 400;
+    let facing = 'user', cam, mic;
+    const camera = () => navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 640 }, height: { ideal: 640 } } });
+    try { [cam, mic] = await Promise.all([camera(), navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })]); }
+    catch { cam?.getTracks().forEach((t) => t.stop()); toast('Нет доступа к камере или микрофону. Разрешите их в настройках браузера'); return; }
+    const video = h('video', { class: 'round-live', playsinline: true, autoplay: true });
+    video.muted = true; video.srcObject = cam; video.play().catch(() => {});
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = SIDE;
+    const g = canvas.getContext('2d');
+    let drawT, thumb = '';
+    const draw = () => {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (vw && vh) {
+        const side = Math.min(vw, vh);
+        g.save();
+        if (facing === 'user') { g.translate(SIDE, 0); g.scale(-1, 1); }
+        g.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, SIDE, SIDE);
+        g.restore();
+        if (!thumb && Date.now() - t0 > 400) {
+          const tc = document.createElement('canvas'); tc.width = tc.height = 160;
+          tc.getContext('2d').drawImage(canvas, 0, 0, 160, 160);
+          thumb = tc.toDataURL('image/jpeg', 0.6);
+        }
+      }
+      drawT = setTimeout(draw, 33);
+    };
+    const out = new MediaStream([...canvas.captureStream(30).getVideoTracks(), ...mic.getAudioTracks()]);
+    const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'].find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
+    const rec = new MediaRecorder(out, { ...(mime ? { mimeType: mime } : {}), videoBitsPerSecond: 800000, audioBitsPerSecond: 48000 });
+    const chunks = [];
+    let cancelled = false, tick;
+    const ring = ringSvg(280, 136);
+    const timer = h('span', { class: 'rec-time' }, '0:00');
+    const stop = (cancel) => { cancelled = cancel; if (rec.state !== 'inactive') rec.stop(); };
+    const overlay = h('div', { class: 'round-rec', role: 'dialog', 'aria-label': 'Запись видеокружка' },
+      h('div', { class: 'round-stage' + (facing === 'user' ? ' mirror' : '') }, video, ring),
+      h('div', { class: 'round-info' }, h('span', { class: 'rec-dot' }), timer, h('span', { class: 'muted' }, ` / ${fmtSec(MAX)}`)),
+      h('div', { class: 'round-ctrl' },
+        h('button', { class: 'icon-btn', 'aria-label': 'Отменить видеокружок', onclick: () => stop(true) }, icon('trash', 24, 1.8)),
+        h('button', { class: 'icon-btn', 'aria-label': 'Сменить камеру', onclick: async () => {
+          try {
+            facing = facing === 'user' ? 'environment' : 'user';
+            const next = await camera();
+            cam.getTracks().forEach((t) => t.stop()); cam = next;
+            video.srcObject = cam; video.play().catch(() => {});
+            overlay.querySelector('.round-stage').classList.toggle('mirror', facing === 'user');
+          } catch { toast('Другой камеры нет'); facing = facing === 'user' ? 'environment' : 'user'; }
+        } }, icon('flip', 24, 1.8)),
+        h('button', { class: 'send', 'aria-label': 'Отправить видеокружок', onclick: () => stop(false) }, icon('send', 22, 2.2))));
+    const esc = (e) => { if (e.key === 'Escape') stop(true); };
+    document.addEventListener('keydown', esc);
+    document.body.append(overlay);
+    S.roundRec = true;
+    const t0 = Date.now();
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    rec.onstop = () => {
+      clearTimeout(drawT); clearInterval(tick);
+      cam.getTracks().forEach((t) => t.stop()); mic.getTracks().forEach((t) => t.stop()); out.getTracks().forEach((t) => t.stop());
+      overlay.remove(); document.removeEventListener('keydown', esc); S.roundRec = false;
+      const dur = Math.round((Date.now() - t0) / 100) / 10;
+      if (cancelled) return;
+      if (dur < 1) { toast('Слишком короткий кружок'); return; }
+      const type = (rec.mimeType || mime || 'video/webm').split(';')[0];
+      sendFiles([new File(chunks, `round-${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`, { type })], { chatId, voice: { round: true, dur, thumb } });
+    };
+    tick = setInterval(() => {
+      const sec = (Date.now() - t0) / 1000;
+      timer.textContent = fmtSec(sec); ring.set(sec / MAX);
+      if (sec >= MAX) stop(false);
+    }, 100);
+    draw();
+    rec.start(500);
+  }
+  let roundPlaying = null;
+  function roundEl(p) {
+    const ring = ringSvg(220, 106);
+    const vid = h('video', { class: 'round-video', playsinline: true, preload: 'none' });
+    const dur = h('span', { class: 'round-dur' }, fmtSec(p.dur || 0));
+    const playIc = h('span', { class: 'round-play' }, icon('play', 30));
+    const box = h('button', { class: 'round', 'aria-label': 'Воспроизвести видеосообщение' },
+      p.thumb ? h('img', { class: 'round-poster', src: p.thumb, alt: '' }) : h('span', { class: 'round-poster ph' }), vid, ring, playIc, dur);
+    const reset = () => { box.classList.remove('playing'); ring.set(0); dur.textContent = fmtSec(p.dur || 0); clear(playIc).append(icon('play', 30)); };
+    vid.addEventListener('timeupdate', () => {
+      const d = isFinite(vid.duration) && vid.duration ? vid.duration : (p.dur || 1);
+      ring.set(vid.currentTime / d); dur.textContent = fmtSec(Math.max(0, d - vid.currentTime));
+    });
+    vid.addEventListener('ended', () => { reset(); vid.currentTime = 0; roundPlaying = null; });
+    vid.addEventListener('pause', () => { if (!vid.ended) clear(playIc).append(icon('play', 30)); box.classList.remove('active'); });
+    vid.addEventListener('play', () => { clear(playIc); box.classList.add('playing', 'active'); });
+    box.addEventListener('click', async () => {
+      if (roundPlaying && roundPlaying !== vid) roundPlaying.pause();
+      if (playing) { playing.audio.pause(); }
+      if (vid.src) { if (vid.paused) { roundPlaying = vid; vid.play().catch(() => {}); } else vid.pause(); return; }
+      clear(playIc).append(h('span', { class: 'spin' }));
+      try {
+        vid.src = await getFileUrl(p);
+        roundPlaying = vid;
+        await vid.play();
+      } catch { vid.removeAttribute('src'); reset(); toast('Не удалось воспроизвести'); }
+    });
+    return box;
+  }
+
   /* Карточка ссылки: картинку уменьшаем и кладём прямо в зашифрованное сообщение */
   async function linkThumb(src) {
     const res = await fetch(src, { credentials: 'same-origin' });
@@ -1598,6 +1720,7 @@
       clear(actionBtn).append(has || !canVoice || S.edit ? icon(S.edit ? 'check' : 'send', 20, 2.2) : icon('mic', 22, 2));
       actionBtn.setAttribute('aria-label', has || S.edit ? (S.edit ? 'Сохранить' : 'Отправить') : canVoice ? 'Записать голосовое' : 'Отправить');
       actionBtn.classList.toggle('idle', !has && (!canVoice || !!S.edit));
+      if (roundBtn) roundBtn.hidden = has || !!S.edit;
     };
     /* Подсказки @упоминаний в группе */
     let mList = [], mIdx = 0;
@@ -1706,7 +1829,8 @@
       ev.preventDefault();
       emojiBtn.setAttribute('aria-expanded', String(media.toggle()));
     } }, icon('smile', 22, 1.8));
-    const row = h('div', { class: 'composer' }, attachBtn, h('div', { class: 'field' }, input, emojiBtn), actionBtn, fileInput);
+    const roundBtn = canVoice ? h('button', { class: 'icon-btn round-btn', 'aria-label': 'Записать видеокружок', title: 'Видеокружок', onclick: () => recordRound(chat.id) }, icon('circleVideo', 24, 1.8)) : null;
+    const row = h('div', { class: 'composer' }, attachBtn, h('div', { class: 'field' }, input, emojiBtn), roundBtn, actionBtn, fileInput);
     const el = h('div', { class: 'composer-wrap' }, mentionPop, replyBox, linkBox, uploadBox, media.el, row);
 
     /* Голосовое сообщение */
