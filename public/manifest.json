@@ -1,0 +1,16 @@
+{
+  "name": "Тихо — мессенджер",
+  "short_name": "Тихо",
+  "description": "Мессенджер со сквозным шифрованием",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0B111C",
+  "theme_color": "#2747E0",
+  "lang": "ru",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
