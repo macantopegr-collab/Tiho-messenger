@@ -34,6 +34,10 @@
     image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
     leave: '<path d="M14 21H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8"/><path d="m17 16 4-4-4-4M21 12H9"/>',
     warn: '<path d="M12 3 2 21h20Z"/><path d="M12 10v4M12 17h.01"/>',
+    down: '<path d="m6 9 6 6 6-6"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+    moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>',
+    auto: '<circle cx="12" cy="12" r="9"/><path d="M12 3v18a9 9 0 0 0 0-18Z" fill="currentColor"/>',
     chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>',
   };
   function icon(name, size = 22, sw = 2) {
@@ -96,7 +100,7 @@
     me: null, priv: null, pub: null, config: { maxFile: 25 * 1024 * 1024 },
     chats: new Map(), msgs: new Map(), plain: new Map(), userKeys: new Map(),
     active: null, filter: 'all', query: '', people: [], typing: new Map(),
-    reply: null, uploads: 0, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
+    reply: null, uploads: 0, fresh: new Set(), newBelow: 0, unreadMark: null, fileUrls: new Map(), ws: null, wsDelay: 1000, refs: {},
   };
 
   /* ---------- форматирование ---------- */
@@ -231,82 +235,172 @@
   }
 
   /* ================= ВХОД ================= */
-  function renderAuth(mode = 'login', error = '') {
+  const FEATURES = [
+    ['lock', 'Сквозное шифрование', 'Сообщения и файлы шифруются на вашем устройстве'],
+    ['shield', 'Двухфакторный вход', 'Код из Google Authenticator защитит аккаунт'],
+    ['group', 'Чаты и группы', 'Фото, файлы, ответы и отметки о прочтении'],
+  ];
+  function authShell(...content) {
     clear(root);
+    const hero = h('section', { class: 'auth-hero', 'aria-hidden': 'true' },
+      h('div', { class: 'brand light' }, h('div', { class: 'logo' }, icon('lock', 22)), h('h1', null, 'Тихо')),
+      h('p', { class: 'hero-title' }, 'Переписка, которую читаете только вы'),
+      h('ul', { class: 'hero-list' }, FEATURES.map(([ic, t, d]) =>
+        h('li', null, h('span', { class: 'hero-ic' }, icon(ic, 20)), h('span', null, h('b', null, t), h('small', null, d))))),
+      h('div', { class: 'hero-bubbles' },
+        h('div', { class: 'hb in' }, 'Привет! Это правда никто не прочитает?'),
+        h('div', { class: 'hb out' }, 'Даже сервер видит только шифр'),
+        h('div', { class: 'hb in short' }, h('span', { class: 'dots' }, h('i'), h('i'), h('i')))));
+    root.append(h('div', { class: 'auth' }, hero,
+      h('section', { class: 'auth-main' }, h('div', { class: 'auth-card' },
+        h('div', { class: 'brand mobile-only' }, h('div', { class: 'logo' }, icon('lock', 22)), h('h1', null, 'Тихо')),
+        ...content))));
+  }
+  function passwordField(attrs) {
+    const input = h('input', { class: 'input', type: 'password', required: true, ...attrs });
+    const eye = h('button', { type: 'button', class: 'eye', 'aria-label': 'Показать пароль', onclick: () => {
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      eye.setAttribute('aria-label', show ? 'Скрыть пароль' : 'Показать пароль');
+      eye.classList.toggle('on', show);
+    } }, icon('eye', 20, 1.8));
+    return { input, el: h('div', { class: 'pw-wrap' }, input, eye) };
+  }
+  function strength(pw) {
+    let s = 0;
+    if (pw.length >= 8) s++;
+    if (pw.length >= 12) s++;
+    if (/[A-ZА-Я]/.test(pw) && /[a-zа-я]/.test(pw)) s++;
+    if (/\d/.test(pw) && /[^A-Za-zА-Яа-я0-9]/.test(pw)) s++;
+    return Math.min(s, 4);
+  }
+
+  function renderAuth(mode = 'login', error = '') {
     const err = h('div', { class: 'err', role: 'alert' }, error);
-    const submit = h('button', { class: 'btn block', type: 'submit' }, mode === 'login' ? 'Войти' : 'Создать аккаунт');
-    const f = {
-      username: h('input', { class: 'input', name: 'username', autocomplete: 'username', autocapitalize: 'none', spellcheck: 'false', required: true, placeholder: 'например, anna_s' }),
-      password: h('input', { class: 'input', type: 'password', name: 'password', autocomplete: mode === 'login' ? 'current-password' : 'new-password', required: true, minlength: mode === 'login' ? null : 8 }),
-      password2: h('input', { class: 'input', type: 'password', autocomplete: 'new-password', required: true }),
-    };
-    const form = h('form', {
-      onsubmit: async (e) => {
-        e.preventDefault();
-        err.textContent = '';
-        const username = f.username.value.trim().replace(/^@/, '');
-        const password = f.password.value;
+    const label = mode === 'login' ? 'Войти' : 'Создать аккаунт';
+    const submit = h('button', { class: 'btn block big', type: 'submit' }, label);
+    const username = h('input', { class: 'input', name: 'username', autocomplete: 'username', autocapitalize: 'none', spellcheck: 'false', required: true, placeholder: 'например, anna_s' });
+    const pw = passwordField({ name: 'password', autocomplete: mode === 'login' ? 'current-password' : 'new-password' });
+    const pw2 = passwordField({ autocomplete: 'new-password' });
+    const meter = h('div', { class: 'meter', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'), h('i'));
+    const meterText = h('small', { class: 'muted meter-text' });
+    if (mode === 'register') {
+      pw.input.addEventListener('input', () => {
+        const s = pw.input.value ? strength(pw.input.value) : 0;
+        meter.dataset.s = s;
+        meterText.textContent = pw.input.value ? ['Слишком короткий', 'Слабый', 'Неплохой', 'Хороший', 'Отличный'][s] : '';
+      });
+    }
+    const busy = (on, text) => { submit.disabled = on; clear(submit).append(on ? h('span', { class: 'spin sm' }) : '', text); };
+
+    const form = h('form', { novalidate: true, onsubmit: async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      const u = username.value.trim().replace(/^@/, '');
+      const password = pw.input.value;
+      if (!u || !password) { err.textContent = 'Введите логин и пароль'; return; }
+      if (mode === 'register') {
+        if (!/^[a-zA-Z0-9_]{3,32}$/.test(u)) { err.textContent = 'Логин: 3–32 символа, латиница, цифры и _'; return; }
+        if (password.length < 8) { err.textContent = 'Пароль — минимум 8 символов'; return; }
+        if (password !== pw2.input.value) { err.textContent = 'Пароли не совпадают'; return; }
+      }
+      busy(true, 'Готовлю ключи шифрования…');
+      try {
+        const { auth, kek } = await C.fromPassword(u, password);
         if (mode === 'register') {
-          if (!/^[a-zA-Z0-9_]{3,32}$/.test(username)) { err.textContent = 'Логин: 3–32 символа, латиница, цифры и _'; return; }
-          if (password.length < 8) { err.textContent = 'Пароль — минимум 8 символов'; return; }
-          if (password !== f.password2.value) { err.textContent = 'Пароли не совпадают'; return; }
-        }
-        submit.disabled = true;
-        submit.textContent = 'Готовлю ключи шифрования…';
-        try {
-          const { auth, kek } = await C.fromPassword(username, password);
-          if (mode === 'register') {
-            const id = await C.createIdentity(kek);
-            const r = await api('/api/register', { body: {
-              username, displayName: username, auth,
-              publicKey: id.publicKey, keyBackup: id.backup } });
-            await C.saveKey(r.user.id, id.privateKey, id.publicKey);
-            Object.assign(S, { me: r.user, priv: id.privateKey, pub: id.publicKey });
-          } else {
-            const r = await api('/api/login', { body: { username, auth } });
-            const priv = await C.unlockIdentity(r.keyBackup, kek);
-            await C.saveKey(r.user.id, priv, r.publicKey);
-            Object.assign(S, { me: r.user, priv, pub: r.publicKey });
-          }
+          const id = await C.createIdentity(kek);
+          const r = await api('/api/register', { body: { username: u, displayName: u, auth, publicKey: id.publicKey, keyBackup: id.backup } });
+          await C.saveKey(r.user.id, id.privateKey, id.publicKey);
+          Object.assign(S, { me: r.user, priv: id.privateKey, pub: id.publicKey });
           startApp();
-        } catch (e2) {
-          err.textContent = e2.status ? e2.message : 'Не удалось: ' + (e2.message || 'ошибка');
-          submit.disabled = false;
-          submit.textContent = mode === 'login' ? 'Войти' : 'Создать аккаунт';
+        } else {
+          const r = await api('/api/login', { body: { username: u, auth } });
+          if (r.need2fa) return renderTwoFactor(r.ticket, u, kek);
+          await finishLogin(r, kek);
         }
-      },
-    },
-    h('label', { class: 'field-label' }, 'Логин', f.username),
-    h('label', { class: 'field-label' }, 'Пароль', f.password),
-    mode === 'register' && h('label', { class: 'field-label' }, 'Повторите пароль', f.password2),
-    mode === 'register' && h('div', { class: 'note' }, icon('lock', 18), h('span', null,
+      } catch (e2) {
+        err.textContent = e2.status ? e2.message : 'Не удалось: ' + (e2.message || 'ошибка');
+        busy(false, label);
+      }
+    } },
+    h('label', { class: 'field-label' }, 'Логин', username),
+    h('label', { class: 'field-label' }, 'Пароль', pw.el),
+    mode === 'register' && h('div', { class: 'meter-row' }, meter, meterText),
+    mode === 'register' && h('label', { class: 'field-label' }, 'Повторите пароль', pw2.el),
+    mode === 'register' && h('div', { class: 'note' }, icon('key', 18), h('span', null,
       'Запомните пароль: восстановить его нельзя, без него старые сообщения не прочитать.')),
     err, submit);
 
-    root.append(h('div', { class: 'auth' }, h('div', { class: 'auth-card' },
-      h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('lock', 22)), h('h1', null, 'Тихо')),
-      h('p', { class: 'auth-sub' }, 'Мессенджер со сквозным шифрованием. Сообщения и файлы шифруются на вашем устройстве — сервер их не видит.'),
+    authShell(
+      h('h2', { class: 'auth-title' }, mode === 'login' ? 'С возвращением' : 'Создайте аккаунт'),
+      h('p', { class: 'auth-sub' }, mode === 'login' ? 'Войдите, чтобы продолжить переписку' : 'Нужны только логин и пароль'),
       h('div', { class: 'seg', role: 'group', 'aria-label': 'Режим' },
         h('button', { type: 'button', 'aria-pressed': String(mode === 'login'), onclick: () => renderAuth('login') }, 'Вход'),
         h('button', { type: 'button', 'aria-pressed': String(mode === 'register'), onclick: () => renderAuth('register') }, 'Регистрация')),
-      form)));
-    f.username.focus();
+      form);
+    username.focus();
+  }
+
+  async function finishLogin(r, kek) {
+    const priv = await C.unlockIdentity(r.keyBackup, kek);
+    await C.saveKey(r.user.id, priv, r.publicKey);
+    Object.assign(S, { me: r.user, priv, pub: r.publicKey });
+    startApp();
+  }
+
+  /* Второй шаг входа: код из Google Authenticator или резервный код */
+  function renderTwoFactor(ticket, username, kek, backup = false) {
+    const err = h('div', { class: 'err', role: 'alert' });
+    const code = h('input', backup
+      ? { class: 'input code-input', autocomplete: 'off', autocapitalize: 'none', placeholder: 'xxxxx-xxxxx', maxlength: 11, 'aria-label': 'Резервный код' }
+      : { class: 'input code-input', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: '000000', maxlength: 7, 'aria-label': 'Код из приложения' });
+    const btn = h('button', { class: 'btn block big', type: 'submit' }, 'Подтвердить');
+    let sending = false;
+    const send = async () => {
+      if (sending) return;
+      sending = true; btn.disabled = true; err.textContent = '';
+      try {
+        const r = await api('/api/login/2fa', { body: { ticket, code: code.value } });
+        await finishLogin(r, kek);
+      } catch (e) {
+        err.textContent = e.message;
+        sending = false; btn.disabled = false;
+        code.select();
+        if (/заново|истекло/.test(e.message)) setTimeout(() => renderAuth('login', e.message), 1200);
+      }
+    };
+    if (!backup) code.addEventListener('input', () => {
+      code.value = code.value.replace(/\D/g, '').slice(0, 6);
+      if (code.value.length === 6) send();
+    });
+    authShell(
+      h('div', { class: 'tfa-badge' }, icon('shield', 30)),
+      h('h2', { class: 'auth-title' }, 'Подтвердите вход'),
+      h('p', { class: 'auth-sub' }, backup
+        ? 'Введите один из резервных кодов, которые вы сохранили при включении защиты. Каждый код работает один раз.'
+        : `Откройте Google Authenticator и введите 6-значный код для «Тихо» (${username}).`),
+      h('form', { onsubmit: (e) => { e.preventDefault(); send(); } }, code, err, btn),
+      h('div', { class: 'auth-links' },
+        h('button', { type: 'button', class: 'link', onclick: () => renderTwoFactor(ticket, username, kek, !backup) },
+          backup ? 'Ввести код из приложения' : 'Нет доступа к телефону? Резервный код'),
+        h('button', { type: 'button', class: 'link', onclick: () => renderAuth('login') }, 'Назад')));
+    code.focus();
   }
 
   /* Сессия есть, но ключа на этом устройстве нет — расшифровываем копию паролем */
   function renderUnlock(backup, publicKey) {
-    clear(root);
     const err = h('div', { class: 'err', role: 'alert' });
-    const pw = h('input', { class: 'input', type: 'password', autocomplete: 'current-password', required: true });
-    const btn = h('button', { class: 'btn block', type: 'submit' }, 'Разблокировать');
-    root.append(h('div', { class: 'auth' }, h('div', { class: 'auth-card' },
-      h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('key', 22)), h('h1', null, 'Тихо')),
-      h('p', { class: 'auth-sub' }, `Здравствуйте, ${S.me.displayName}. Введите пароль, чтобы расшифровать ключи на этом устройстве.`),
+    const pw = passwordField({ autocomplete: 'current-password' });
+    const btn = h('button', { class: 'btn block big', type: 'submit' }, 'Разблокировать');
+    authShell(
+      h('div', { class: 'tfa-badge' }, icon('key', 30)),
+      h('h2', { class: 'auth-title' }, `Здравствуйте, ${S.me.displayName}`),
+      h('p', { class: 'auth-sub' }, 'Введите пароль, чтобы расшифровать ключи на этом устройстве.'),
       h('form', { onsubmit: async (e) => {
         e.preventDefault();
         btn.disabled = true; btn.textContent = 'Проверяю…'; err.textContent = '';
         try {
-          const { kek } = await C.fromPassword(S.me.username, pw.value);
+          const { kek } = await C.fromPassword(S.me.username, pw.input.value);
           const priv = await C.unlockIdentity(backup, kek);
           await C.saveKey(S.me.id, priv, publicKey);
           Object.assign(S, { priv, pub: publicKey });
@@ -315,9 +409,9 @@
           err.textContent = 'Неверный пароль';
           btn.disabled = false; btn.textContent = 'Разблокировать';
         }
-      } }, h('label', { class: 'field-label' }, 'Пароль', pw), err, btn),
-      h('button', { class: 'btn ghost block', onclick: logout }, 'Войти в другой аккаунт'))));
-    pw.focus();
+      } }, h('label', { class: 'field-label' }, 'Пароль', pw.el), err, btn),
+      h('div', { class: 'auth-links' }, h('button', { type: 'button', class: 'link', onclick: logout }, 'Войти в другой аккаунт')));
+    pw.input.focus();
   }
 
   async function logout() {
@@ -399,6 +493,7 @@
     }, 250);
   }
 
+  const dots = () => h('span', { class: 'tdots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'));
   function typingText(chatId) {
     const t = S.typing.get(chatId);
     if (!t || !t.size) return '';
@@ -438,7 +533,7 @@
           h('span', { class: 'ci-name' }, chatTitle(c)),
           h('span', { class: 'ci-time' + (c.unread ? ' hot' : '') }, shortTime(lastTs(c)))),
         h('div', { class: 'ci-row' },
-          h('span', { class: 'ci-prev' + (ty ? ' typing' : '') }, ty || prev),
+          ty ? h('span', { class: 'ci-prev typing' }, dots(), ty) : h('span', { class: 'ci-prev' }, prev),
           c.unread ? h('span', { class: 'badge', 'aria-label': `${c.unread} непрочитанных` }, c.unread > 99 ? '99+' : c.unread) : null)))));
     }
     if (qv && S.people.length) {
@@ -481,6 +576,9 @@
     const wasOpen = S.active != null;
     S.active = id;
     S.reply = null;
+    S.newBelow = 0;
+    const ch = S.chats.get(id);
+    S.unreadMark = ch && ch.unread ? { chatId: id, after: ch.lastReadId || 0, scrolled: false } : null;
     S.refs.app.classList.add('in-chat');
     if (MOBILE() && !wasOpen) history.pushState({ chat: id }, '');
     renderList();
@@ -573,9 +671,13 @@
     const inner = h('div', { class: 'msgs-inner' });
     msgs.append(inner);
     const typingRow = h('div', { class: 'typing-row', 'aria-live': 'polite' });
+    const downBadge = h('span', { class: 'badge' });
+    const down = h('button', { class: 'to-bottom', 'aria-label': 'К последним сообщениям', onclick: () => {
+      msgs.scrollTo({ top: msgs.scrollHeight, behavior: 'smooth' });
+    } }, icon('down', 24), downBadge);
     const composer = buildComposer(chat);
-    pane.append(head, keyWarnBox, msgs, composer.el);
-    Object.assign(S.refs, { head, keyWarnBox, msgs, inner, typingRow, composer });
+    pane.append(head, keyWarnBox, h('div', { class: 'msgs-wrap' }, msgs, down), composer.el);
+    Object.assign(S.refs, { head, keyWarnBox, msgs, inner, typingRow, composer, down, downBadge });
     pane.style.position = 'relative';
     setupDrop(pane);
     renderHead();
@@ -593,7 +695,7 @@
       h('button', { class: 'icon-btn back', 'aria-label': 'Назад к чатам', onclick: () => (history.state?.chat ? history.back() : closeChat()) }, icon('back', 24)),
       avatar(chat, 42),
       h('button', { class: 'head-title', onclick: () => openInfo(chat.id) },
-        h('b', null, chatTitle(chat)), h('small', { class: st.cls }, st.text)),
+        h('b', null, chatTitle(chat)), h('small', { class: st.cls }, st.cls === 'typing' ? dots() : null, st.text)),
       h('button', { class: 'icon-btn', 'aria-label': 'О чате и шифровании', title: 'О чате и шифровании', onclick: () => openInfo(chat.id) }, icon('info', 22, 1.8)));
     const warn = clear(S.refs.keyWarnBox);
     const changed = chat.members.filter((m) => m.id !== S.me.id && keyChanged(m));
@@ -604,7 +706,17 @@
     }
   }
 
+  function updateDown() {
+    const { msgs, down, downBadge } = S.refs;
+    if (!msgs || !down) return;
+    const far = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight > 240;
+    if (!far) S.newBelow = 0;
+    down.classList.toggle('show', far);
+    downBadge.textContent = S.newBelow > 99 ? '99+' : S.newBelow;
+    downBadge.style.display = S.newBelow ? '' : 'none';
+  }
   function onMsgsScroll() {
+    updateDown();
     const m = S.refs.msgs;
     const box = S.msgs.get(S.active);
     if (m && m.scrollTop < 80 && box?.hasMore && !box.loading && box.list.length >= 50) loadMessages(S.active, true);
@@ -628,17 +740,33 @@
       }
       if (!box.list.length) inner.append(h('div', { class: 'sys' }, 'Напишите первое сообщение — его увидите только вы и собеседник'));
       let prev = null;
+      const mark = S.unreadMark && S.unreadMark.chatId === chat.id ? S.unreadMark : null;
+      const firstNew = mark ? box.list.find((m) => typeof m.id === 'number' && m.id > mark.after && m.kind === 'msg' && m.senderId !== S.me.id) : null;
       box.list.forEach((m, i) => {
-        if (!prev || !sameDay(prev.createdAt, m.createdAt)) inner.append(h('div', { class: 'day' }, dayLabel(m.createdAt)));
+        if (!prev || !sameDay(prev.createdAt, m.createdAt)) inner.append(h('div', { class: 'day' }, h('span', null, dayLabel(m.createdAt))));
+        if (firstNew && m === firstNew) inner.append(h('div', { class: 'new-divider', id: 'new-divider' }, h('span', null, 'Новые сообщения')));
         const next = box.list[i + 1];
         inner.append(messageEl(chat, m, prev, next));
         prev = m;
       });
     }
     inner.append(typingRow);
-    typingRow.textContent = typingText(chat.id) ? (chat.type === 'direct' ? chatTitle(chat).split(' ')[0] + ' ' : '') + typingText(chat.id) : '';
-    if (scroll === 'bottom' || (scroll !== 'keep' && atBottom)) msgs.scrollTop = msgs.scrollHeight;
+    fillTyping(chat);
+    const divider = inner.querySelector('#new-divider');
+    if (divider && S.unreadMark && !S.unreadMark.scrolled && box && !box.loading) {
+      S.unreadMark.scrolled = true;
+      msgs.scrollTop = Math.max(0, divider.offsetTop - 80);
+    } else if (scroll === 'bottom' || (scroll !== 'keep' && atBottom)) msgs.scrollTop = msgs.scrollHeight;
     else if (scroll === 'keep') msgs.scrollTop = prevTop + (msgs.scrollHeight - prevH);
+    S.fresh.clear();
+    updateDown();
+  }
+  function fillTyping(chat) {
+    const row = S.refs.typingRow;
+    if (!row) return;
+    clear(row);
+    const t = typingText(chat.id);
+    if (t) row.append(dots(), (chat.type === 'direct' ? chatTitle(chat).split(' ')[0] + ' ' : '') + t);
   }
 
   function readStatus(chat, m) {
@@ -682,16 +810,45 @@
     const actions = p.t !== 'error' && !m.pending ? h('div', { class: 'msg-actions' },
       h('button', { 'aria-label': 'Ответить', title: 'Ответить', onclick: () => setReply(m, p, senderName) }, icon('reply', 18)),
       p.t === 'text' ? h('button', { 'aria-label': 'Копировать', title: 'Копировать', onclick: () => copyText(p.text) }, icon('copy', 17)) : null) : null;
-    if (COARSE && p.t !== 'error' && !m.pending) {
-      let timer;
-      bubble.addEventListener('touchstart', () => { timer = setTimeout(() => { navigator.vibrate?.(15); setReply(m, p, senderName); }, 450); }, { passive: true });
-      ['touchend', 'touchmove', 'touchcancel'].forEach((ev) => bubble.addEventListener(ev, () => clearTimeout(timer), { passive: true }));
+    if (p.t !== 'error' && !m.pending) {
+      const items = [
+        ['reply', 'Ответить', () => setReply(m, p, senderName)],
+        p.t === 'text' && ['copy', 'Копировать текст', () => copyText(p.text)],
+        p.t === 'file' && ['download', 'Скачать файл', () => downloadFile(p)],
+        p.t === 'file' && p.caption && ['copy', 'Копировать подпись', () => copyText(p.caption)],
+      ].filter(Boolean);
+      bubble.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, items, bubble); });
+      let timer, sx = 0, sy = 0;
+      bubble.addEventListener('touchstart', (e) => {
+        sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+        timer = setTimeout(() => { navigator.vibrate?.(12); openMenu(sx, sy, items, bubble); }, 420);
+      }, { passive: true });
+      bubble.addEventListener('touchmove', (e) => {
+        if (Math.abs(e.touches[0].clientX - sx) > 8 || Math.abs(e.touches[0].clientY - sy) > 8) clearTimeout(timer);
+      }, { passive: true });
+      ['touchend', 'touchcancel'].forEach((ev) => bubble.addEventListener(ev, () => clearTimeout(timer), { passive: true }));
     }
-    const row = h('div', { class: 'row ' + (mine ? 'out' : 'in') + (firstOfGroup ? ' gap' : '') });
+    const row = h('div', { class: 'row ' + (mine ? 'out' : 'in') + (firstOfGroup ? ' gap' : '') + (S.fresh.has(m.id) ? ' pop' : '') });
     if (showAvatar) row.append(lastOfGroup ? userAvatar(sender || { displayName: '?', color: 7 }, 32) : h('span', { class: 'av-space' }));
     const parts = mine ? [actions, bubble] : [bubble, actions];
     for (const part of parts) if (part) row.append(part);
     return row;
+  }
+
+  /* Всплывающее меню сообщения (правый клик или долгое нажатие) */
+  function openMenu(x, y, items, anchor) {
+    document.querySelector('.ctx')?.remove();
+    anchor?.classList.add('held');
+    const close = () => { menu.remove(); anchor?.classList.remove('held'); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', esc); };
+    const outside = (e) => { if (!menu.contains(e.target)) close(); };
+    const esc = (e) => { if (e.key === 'Escape') close(); };
+    const menu = h('div', { class: 'ctx', role: 'menu' }, items.map(([ic, label, fn]) =>
+      h('button', { role: 'menuitem', onclick: () => { close(); fn(); } }, icon(ic, 18), label)));
+    document.body.append(menu);
+    const r = menu.getBoundingClientRect();
+    menu.style.left = Math.max(8, Math.min(x, innerWidth - r.width - 8)) + 'px';
+    menu.style.top = Math.max(8, Math.min(y, innerHeight - r.height - 8)) + 'px';
+    setTimeout(() => { document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', esc); menu.querySelector('button')?.focus(); }, 0);
   }
 
   function jumpTo(id) {
@@ -767,6 +924,7 @@
     const autosize = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px'; };
     input.addEventListener('input', () => {
       autosize();
+      sendBtn.classList.toggle('idle', !input.value.trim());
       if (Date.now() - lastTyping > 2500 && input.value.trim()) {
         lastTyping = Date.now();
         wsSend({ type: 'typing', chatId: chat.id });
@@ -780,11 +938,13 @@
       const files = [...(e.clipboardData?.files || [])];
       if (files.length) { e.preventDefault(); sendFiles(files); }
     });
+    const sendBtn = h('button', { class: 'send idle', 'aria-label': 'Отправить', onclick: () => submit() }, icon('send', 20, 2.2));
     const submit = () => {
       const text = input.value.trim();
       if (!text) return;
       input.value = '';
       autosize();
+      sendBtn.classList.add('idle');
       sendPayload({ t: 'text', text });
       if (!COARSE) input.focus();
     };
@@ -792,7 +952,7 @@
       h('div', { class: 'composer' },
         h('button', { class: 'icon-btn', style: 'color:var(--muted)', 'aria-label': 'Прикрепить фото или файл', title: 'Прикрепить', onclick: () => fileInput.click() }, icon('attach', 24, 1.8)),
         h('label', { class: 'field' }, input),
-        h('button', { class: 'send', 'aria-label': 'Отправить', onclick: submit }, icon('send', 20, 2.2)),
+        sendBtn,
         fileInput));
     return { el, input, replyBox, uploadBox };
   }
@@ -826,6 +986,7 @@
     S.msgs.set(chatId, box);
     const temp = { id: 'tmp-' + clientId, clientId, chatId, senderId: S.me.id, kind: 'msg', createdAt: Date.now(), pending: true, payload };
     box.list.push(temp);
+    S.fresh.add(temp.id);
     if (S.active === chatId) renderMessages('bottom');
     try {
       const envelope = await C.encryptMessage(payload, {
@@ -892,7 +1053,7 @@
       const i = clientId ? box.list.findIndex((m) => m.clientId === clientId) : -1;
       if (box.list.some((m) => m.id === msg.id)) { if (i >= 0) box.list.splice(i, 1); }
       else if (i >= 0) box.list[i] = msg;
-      else box.list = mergeList(box.list, [msg]);
+      else { box.list = mergeList(box.list, [msg]); S.fresh.add(msg.id); }
     }
     const isNew = !chat.lastMessage || msg.id > chat.lastMessage.id;
     if (isNew) chat.lastMessage = msg;
@@ -905,7 +1066,11 @@
     }
     renderList();
     updateTitle();
-    if (S.active === chat.id) { renderMessages(mine ? 'bottom' : undefined); renderHead(); if (viewing) markRead(); }
+    if (S.active === chat.id) {
+      const m = S.refs.msgs;
+      if (!mine && isNew && m && m.scrollHeight - m.scrollTop - m.clientHeight > 240) S.newBelow++;
+      renderMessages(mine ? 'bottom' : undefined); renderHead(); if (viewing) markRead();
+    }
   }
 
   function notify(chat, msg) {
@@ -1000,7 +1165,7 @@
       renderHead();
       const chat = S.chats.get(chatId);
       const t = typingText(chatId);
-      if (S.refs.typingRow) S.refs.typingRow.textContent = t ? (chat.type === 'direct' ? chatTitle(chat).split(' ')[0] + ' ' : '') + t : '';
+      if (t !== undefined) fillTyping(chat);
     }
   }
 
@@ -1140,19 +1305,20 @@
   }
 
   /* Настройки */
-  function openSettings() {
-    const nameInput = h('input', { class: 'input', value: S.me.displayName, maxlength: 64 });
-    const saveName = h('button', { class: 'btn', style: 'height:46px', onclick: async () => {
+  async function openSettings() {
+    let info = { twoFactor: false, backupLeft: 0 };
+    try { info = await api('/api/me'); } catch { /* покажем без статуса */ }
+    const nameInput = h('input', { class: 'input', value: S.me.displayName, maxlength: 64, 'aria-label': 'Имя' });
+    const saveName = h('button', { class: 'btn', onclick: async () => {
       try { const { user } = await api('/api/me', { method: 'PATCH', body: { displayName: nameInput.value } }); S.me = user; renderMe(); toast('Имя сохранено'); } catch (e) { toast(e.message); }
     } }, 'Сохранить');
     const themeNow = store.get('tiho-theme', 'auto');
     const themeSeg = h('div', { class: 'theme-seg', role: 'group', 'aria-label': 'Тема' },
-      [['light', 'Светлая'], ['dark', 'Тёмная'], ['auto', 'Как в системе']].map(([k, l]) => h('button', {
-        'aria-pressed': String(themeNow === k), 'data-k': k, onclick: (e) => {
+      [['light', 'Светлая', 'sun'], ['dark', 'Тёмная', 'moon'], ['auto', 'Авто', 'auto']].map(([k, l, ic]) => h('button', {
+        'aria-pressed': String(themeNow === k), 'data-k': k, onclick: () => {
           store.set('tiho-theme', k); applyTheme();
           themeSeg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.k === k)));
-          e.currentTarget.blur?.();
-        } }, l)));
+        } }, icon(ic, 18), l)));
     const sw = (key, label, sub, ic, onTurnOn) => {
       const b = h('button', { class: 'sw', role: 'switch', 'aria-checked': String(store.get(key, false)), 'aria-label': label });
       b.addEventListener('click', async () => {
@@ -1168,26 +1334,100 @@
       if (p !== 'granted') toast('Уведомления запрещены в настройках браузера');
       return p === 'granted';
     };
-    const fp = h('div', { class: 'code', style: 'color:var(--text-2);grid-template-columns:repeat(4,minmax(0,1fr))' });
+    const fp = h('div', { class: 'code fp' });
     crypto.subtle.digest('SHA-256', new TextEncoder().encode(S.pub)).then((d) => {
       const b = new Uint8Array(d);
       for (let i = 0; i < 8; i++) fp.append(h('span', null, ((b[i * 2] << 8 | b[i * 2 + 1]) % 10000).toString().padStart(4, '0')));
     });
-    modal('Настройки', [
-      h('div', { style: 'display:flex;align-items:center;gap:14px' }, userAvatar(S.me, 64),
-        h('div', { style: 'min-width:0' }, h('b', { style: 'font-size:18px;display:block' }, S.me.displayName), h('span', { class: 'muted' }, '@' + S.me.username))),
-      h('label', { class: 'field-label' }, 'Имя', h('div', { style: 'display:flex;gap:8px' }, nameInput, saveName)),
-      h('div', { class: 'field-label' }, 'Тема', themeSeg),
-      h('div', { class: 'card' },
+    const tfaRow = h('button', { class: 'card-row', onclick: () => { close(); info.twoFactor ? openDisable2fa(info.backupLeft) : openEnable2fa(); } },
+      h('span', { class: 'ic', style: info.twoFactor ? 'background:var(--ok-soft);color:var(--ok)' : '' }, icon('shield', 19, 1.9)),
+      h('span', { class: 'grow' }, h('b', null, 'Google Authenticator'),
+        h('small', null, info.twoFactor ? `Код при входе · резервных кодов: ${info.backupLeft}` : 'Код из приложения при каждом входе')),
+      h('span', { class: 'chip-status' + (info.twoFactor ? ' on' : '') }, info.twoFactor ? 'Включено' : 'Выключено'));
+    const section = (title, ...kids) => h('div', { class: 'section' }, h('div', { class: 'section-title' }, title), ...kids);
+
+    const close = modal('Настройки', [
+      h('div', { class: 'profile-card' }, userAvatar(S.me, 72),
+        h('div', { style: 'min-width:0' }, h('b', null, S.me.displayName), h('span', { class: 'muted' }, '@' + S.me.username))),
+      section('Профиль', h('div', { class: 'card', style: 'padding:14px 16px' },
+        h('label', { class: 'field-label' }, 'Имя, которое видят другие', h('div', { style: 'display:flex;gap:8px' }, nameInput, saveName)))),
+      section('Безопасность', h('div', { class: 'card' }, tfaRow)),
+      section('Оформление', themeSeg),
+      section('Уведомления', h('div', { class: 'card' },
         sw('tiho-notify', 'Уведомления', 'Когда вкладка свёрнута', 'bell', askNotif),
-        sw('tiho-notify-text', 'Текст в уведомлениях', 'Показывать содержимое сообщений', 'eye')),
-      h('div', { class: 'card', style: 'padding:14px 16px;display:flex;flex-direction:column;gap:10px' },
+        sw('tiho-notify-text', 'Текст в уведомлениях', 'Показывать содержимое сообщений', 'eye'))),
+      section('Шифрование', h('div', { class: 'card', style: 'padding:14px 16px;display:flex;flex-direction:column;gap:10px' },
         h('div', { style: 'display:flex;align-items:center;gap:8px;font-weight:600' }, icon('key', 18), 'Отпечаток вашего ключа'),
         fp,
         h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' },
-          'Ключи хранятся только на ваших устройствах. Сервер передаёт зашифрованные сообщения и файлы и не может их расшифровать. Копия ключа на сервере зашифрована вашим паролем.')),
-      h('button', { class: 'btn danger block', onclick: logout }, icon('logout', 18), 'Выйти'),
+          'Ключи хранятся только на ваших устройствах. Сервер передаёт зашифрованные сообщения и файлы и не может их расшифровать.'))),
+      h('button', { class: 'btn danger block', onclick: logout }, icon('logout', 18), 'Выйти из аккаунта'),
     ]);
+  }
+
+  /* Включение Google Authenticator: QR → код → резервные коды */
+  async function openEnable2fa() {
+    let setup;
+    try { setup = await api('/api/2fa/setup', { method: 'POST' }); } catch (e) { toast(e.message); return; }
+    const err = h('div', { class: 'err', role: 'alert' });
+    const code = h('input', { class: 'input code-input', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: '000000', maxlength: 6, 'aria-label': 'Код из приложения' });
+    const btn = h('button', { class: 'btn block', disabled: true }, 'Включить защиту');
+    code.addEventListener('input', () => { code.value = code.value.replace(/\D/g, '').slice(0, 6); btn.disabled = code.value.length !== 6; });
+    const step = (n, title, ...kids) => h('div', { class: 'step' }, h('span', { class: 'step-n' }, n), h('div', { class: 'step-body' }, h('b', null, title), ...kids));
+    const body = h('div', { style: 'display:flex;flex-direction:column;gap:16px' },
+      step(1, 'Установите приложение', h('small', { class: 'muted' }, 'Google Authenticator из App Store или Google Play. Подойдёт и любое другое приложение для кодов.')),
+      step(2, 'Отсканируйте QR-код',
+        h('div', { class: 'qr-box' }, h('img', { src: setup.qr, alt: 'QR-код для Google Authenticator', width: 200, height: 200 })),
+        h('small', { class: 'muted' }, 'Или нажмите «+» → «Ввести ключ настройки» и введите ключ:'),
+        h('div', { class: 'secret' }, h('code', null, setup.secret),
+          h('button', { class: 'icon-btn', 'aria-label': 'Скопировать ключ', onclick: () => copyText(setup.secret.replace(/\s/g, '')) }, icon('copy', 18))),
+        h('a', { class: 'link', href: setup.uri }, 'Открыть в приложении на этом телефоне')),
+      step(3, 'Введите код из приложения', code, err, btn));
+    const close = modal('Google Authenticator', body);
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; err.textContent = '';
+      try {
+        const r = await api('/api/2fa/enable', { body: { code: code.value } });
+        close();
+        showBackupCodes(r.backupCodes);
+      } catch (e) { err.textContent = e.message; btn.disabled = false; code.select(); }
+    });
+  }
+
+  function showBackupCodes(codes) {
+    const text = codes.join('\n');
+    const close = modal('Защита включена', [
+      h('div', { class: 'success-head' }, h('span', { class: 'tfa-badge ok' }, icon('shield', 30)),
+        h('b', null, 'Теперь при входе понадобится код из Google Authenticator')),
+      h('div', { class: 'note' }, icon('warn', 18), h('span', null, 'Сохраните резервные коды. Если потеряете телефон, войти можно будет только с ними. Каждый код работает один раз, показываем их только сейчас.')),
+      h('div', { class: 'backup-grid' }, codes.map((c) => h('code', null, c))),
+      h('div', { style: 'display:flex;gap:8px' },
+        h('button', { class: 'btn ghost', style: 'flex:1', onclick: () => copyText(text) }, icon('copy', 18), 'Скопировать'),
+        h('button', { class: 'btn ghost', style: 'flex:1', onclick: () => {
+          const url = URL.createObjectURL(new Blob(['Резервные коды «Тихо» (' + S.me.username + ')\n\n' + text + '\n'], { type: 'text/plain' }));
+          const a = h('a', { href: url, download: 'tiho-backup-codes.txt' }); document.body.append(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 2000);
+        } }, icon('download', 18), 'Скачать')),
+      h('button', { class: 'btn block', onclick: () => close() }, 'Я сохранил коды'),
+    ]);
+  }
+
+  function openDisable2fa(left) {
+    const err = h('div', { class: 'err', role: 'alert' });
+    const code = h('input', { class: 'input code-input', autocomplete: 'one-time-code', placeholder: 'код или резервный код', maxlength: 11, 'aria-label': 'Код' });
+    const btn = h('button', { class: 'btn danger block' }, 'Отключить защиту');
+    const close = modal('Google Authenticator', [
+      h('div', { class: 'success-head' }, h('span', { class: 'tfa-badge ok' }, icon('shield', 30)),
+        h('b', null, 'Двухфакторная защита включена'),
+        h('small', { class: 'muted' }, `Резервных кодов осталось: ${left}`)),
+      h('p', { class: 'muted', style: 'margin:0;line-height:1.45' }, 'Чтобы отключить защиту, введите текущий код из приложения или один из резервных кодов.'),
+      code, err, btn,
+    ]);
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; err.textContent = '';
+      try { await api('/api/2fa/disable', { body: { code: code.value } }); close(); toast('Двухфакторная защита отключена'); }
+      catch (e) { err.textContent = e.message; btn.disabled = false; }
+    });
   }
 
   /* ================= ЗАПУСК ================= */
@@ -1195,19 +1435,16 @@
     applyTheme();
     if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(() => {});
     if (!window.isSecureContext || !crypto.subtle) {
-      clear(root).append(h('div', { class: 'auth' }, h('div', { class: 'auth-card' },
-        h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('lock', 22)), h('h1', null, 'Тихо')),
-        h('div', { class: 'note' }, icon('warn', 18), h('span', null, 'Шифрование работает только по защищённому адресу (https://). Откройте мессенджер через https.')))));
+      authShell(h('div', { class: 'note' }, icon('warn', 18), h('span', null, 'Шифрование работает только по защищённому адресу (https://). Откройте мессенджер через https.')));
       return;
     }
-    clear(root).append(h('div', { class: 'splash' }, h('div', { class: 'spin' })));
+    clear(root).append(h('div', { class: 'splash' }, h('div', { class: 'logo pulse' }, icon('lock', 28))));
     try { S.config = await api('/api/config'); } catch { /* по умолчанию */ }
     let me;
     try { me = await api('/api/me'); } catch (e) {
       if (e.status === 401) return renderAuth('login');
-      clear(root).append(h('div', { class: 'auth' }, h('div', { class: 'auth-card' },
-        h('div', { class: 'note' }, icon('warn', 18), h('span', null, 'Нет связи с сервером. Проверьте интернет.')),
-        h('button', { class: 'btn block', onclick: boot }, 'Повторить'))));
+      authShell(h('div', { class: 'note' }, icon('warn', 18), h('span', null, 'Нет связи с сервером. Проверьте интернет.')),
+        h('button', { class: 'btn block big', onclick: boot }, 'Повторить'));
       return;
     }
     S.me = me.user;

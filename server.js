@@ -12,6 +12,7 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const { DatabaseSync } = require('node:sqlite');
 const bcrypt = require('bcryptjs');
+const QRCode = require('qrcode');
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -79,6 +80,15 @@ CREATE TABLE IF NOT EXISTS files (
 );
 `);
 
+/* Миграция: поля для двухфакторной аутентификации */
+{
+  const cols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+  if (!cols.has('totp_secret')) db.exec('ALTER TABLE users ADD COLUMN totp_secret TEXT');
+  if (!cols.has('totp_pending')) db.exec('ALTER TABLE users ADD COLUMN totp_pending TEXT');
+  if (!cols.has('totp_last_step')) db.exec('ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0');
+  if (!cols.has('backup_codes')) db.exec("ALTER TABLE users ADD COLUMN backup_codes TEXT NOT NULL DEFAULT '[]'");
+}
+
 const now = () => Date.now();
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
@@ -121,7 +131,72 @@ const q = {
   deleteEmptyChat: db.prepare('DELETE FROM chats WHERE id = ? AND NOT EXISTS (SELECT 1 FROM members WHERE chat_id = ?)'),
 };
 
+q.setTotpPending = db.prepare('UPDATE users SET totp_pending = ? WHERE id = ?');
+q.enableTotp = db.prepare('UPDATE users SET totp_secret = ?, totp_pending = NULL, totp_last_step = ?, backup_codes = ? WHERE id = ?');
+q.disableTotp = db.prepare("UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_last_step = 0, backup_codes = '[]' WHERE id = ?");
+q.setTotpStep = db.prepare('UPDATE users SET totp_last_step = ? WHERE id = ?');
+q.setBackupCodes = db.prepare('UPDATE users SET backup_codes = ? WHERE id = ?');
+
 setInterval(() => q.purgeSessions.run(now()), 6 * 3600 * 1000).unref();
+
+/* ---------- Google Authenticator (TOTP, RFC 6238) ---------- */
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function b32encode(buf) {
+  let bits = 0, val = 0, out = '';
+  for (const b of buf) { val = (val << 8) | b; bits += 8; while (bits >= 5) { out += B32[(val >>> (bits - 5)) & 31]; bits -= 5; } }
+  if (bits > 0) out += B32[(val << (5 - bits)) & 31];
+  return out;
+}
+function b32decode(str) {
+  let bits = 0, val = 0; const out = [];
+  for (const ch of str.replace(/=+$/, '').toUpperCase()) {
+    const i = B32.indexOf(ch); if (i < 0) continue;
+    val = (val << 5) | i; bits += 5;
+    if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  return Buffer.from(out);
+}
+function totpAt(secret, step) {
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(step));
+  const h = crypto.createHmac('sha1', b32decode(secret)).update(msg).digest();
+  const o = h[h.length - 1] & 15;
+  const n = ((h[o] & 127) << 24) | (h[o + 1] << 16) | (h[o + 2] << 8) | h[o + 3];
+  return String(n % 1000000).padStart(6, '0');
+}
+/* Возвращает номер шага, если код верный и ещё не использовался (окно ±30 секунд) */
+function checkTotp(secret, code, lastStep = 0) {
+  code = String(code || '').replace(/\s/g, '');
+  if (!/^\d{6}$/.test(code)) return 0;
+  const cur = Math.floor(Date.now() / 30000);
+  for (const step of [cur - 1, cur, cur + 1]) {
+    if (step <= lastStep) continue;
+    const a = Buffer.from(totpAt(secret, step)), b = Buffer.from(code);
+    if (crypto.timingSafeEqual(a, b)) return step;
+  }
+  return 0;
+}
+const normBackup = (c) => String(c || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+function useBackupCode(user, code) {
+  const n = normBackup(code);
+  if (n.length !== 10) return false;
+  const list = JSON.parse(user.backup_codes || '[]');
+  const i = list.indexOf(sha256('tiho-backup:' + n));
+  if (i < 0) return false;
+  list.splice(i, 1);
+  q.setBackupCodes.run(JSON.stringify(list), user.id);
+  return true;
+}
+function newBackupCodes() {
+  const plain = Array.from({ length: 8 }, () => {
+    const c = crypto.randomBytes(5).toString('hex');
+    return c.slice(0, 5) + '-' + c.slice(5);
+  });
+  return { plain, hashed: plain.map((c) => sha256('tiho-backup:' + normBackup(c))) };
+}
+/* Вход в два шага: после пароля выдаём одноразовый билет, сессия — только после кода */
+const loginTickets = new Map();
+setInterval(() => { const t = now(); for (const [k, v] of loginTickets) if (v.exp < t) loginTickets.delete(k); }, 60000).unref();
 
 /* ---------- Вспомогательное ---------- */
 const cookie = {
@@ -239,6 +314,27 @@ app.post('/api/login', json, (req, res) => {
   if (!user || typeof authKey !== 'string' || !bcrypt.compareSync(authKey, user.pass_hash)) {
     return fail(res, 401, 'Неверный логин или пароль');
   }
+  if (user.totp_secret) {
+    const ticket = crypto.randomBytes(24).toString('base64url');
+    loginTickets.set(ticket, { userId: user.id, exp: now() + 5 * 60000, tries: 0 });
+    return res.json({ need2fa: true, ticket });
+  }
+  startSession(req, res, user.id);
+  res.json({ user: publicUser(user), publicKey: user.public_key, keyBackup: JSON.parse(user.key_backup) });
+});
+
+app.post('/api/login/2fa', json, (req, res) => {
+  if (rateLimited('2fa:' + req.ip, 30)) return fail(res, 429, 'Слишком много попыток, подождите 10 минут');
+  const t = loginTickets.get(String(req.body?.ticket || ''));
+  if (!t || t.exp < now()) return fail(res, 401, 'Время входа истекло, введите пароль ещё раз');
+  if (++t.tries > 5) { loginTickets.delete(req.body.ticket); return fail(res, 401, 'Слишком много неверных кодов, войдите заново'); }
+  const user = q.userById.get(t.userId);
+  if (!user || !user.totp_secret) return fail(res, 401, 'Войдите заново');
+  const code = String(req.body?.code || '');
+  const step = checkTotp(user.totp_secret, code, user.totp_last_step);
+  if (step) q.setTotpStep.run(step, user.id);
+  else if (!useBackupCode(user, code)) return fail(res, 401, 'Неверный код');
+  loginTickets.delete(req.body.ticket);
   startSession(req, res, user.id);
   res.json({ user: publicUser(user), publicKey: user.public_key, keyBackup: JSON.parse(user.key_backup) });
 });
@@ -251,7 +347,40 @@ app.post('/api/logout', (req, res) => {
 });
 
 app.get('/api/me', auth, (req, res) => {
-  res.json({ user: publicUser(req.user), publicKey: req.user.public_key, keyBackup: JSON.parse(req.user.key_backup) });
+  res.json({ user: publicUser(req.user), publicKey: req.user.public_key, keyBackup: JSON.parse(req.user.key_backup),
+    twoFactor: !!req.user.totp_secret, backupLeft: JSON.parse(req.user.backup_codes || '[]').length });
+});
+
+app.post('/api/2fa/setup', auth, async (req, res) => {
+  if (req.user.totp_secret) return fail(res, 400, 'Двухфакторная защита уже включена');
+  const secret = b32encode(crypto.randomBytes(20));
+  q.setTotpPending.run(secret, req.user.id);
+  const host = (req.headers.host || 'tiho').split(':')[0];
+  const label = encodeURIComponent(`Тихо (${host}):${req.user.username}`);
+  const uri = `otpauth://totp/${label}?secret=${secret}&issuer=${encodeURIComponent('Тихо')}&algorithm=SHA1&digits=6&period=30`;
+  const svg = await QRCode.toString(uri, { type: 'svg', margin: 1, errorCorrectionLevel: 'M', color: { dark: '#0E1726', light: '#FFFFFF' } });
+  res.json({ secret: secret.replace(/(.{4})/g, '$1 ').trim(), uri, qr: 'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64') });
+});
+
+app.post('/api/2fa/enable', auth, json, (req, res) => {
+  if (rateLimited('2fa-set:' + req.user.id, 20)) return fail(res, 429, 'Слишком много попыток, подождите');
+  const u = q.userById.get(req.user.id);
+  if (!u.totp_pending) return fail(res, 400, 'Начните настройку заново');
+  const step = checkTotp(u.totp_pending, req.body?.code);
+  if (!step) return fail(res, 400, 'Код не подошёл. Проверьте время на телефоне и введите свежий код');
+  const codes = newBackupCodes();
+  q.enableTotp.run(u.totp_pending, step, JSON.stringify(codes.hashed), u.id);
+  res.json({ ok: true, backupCodes: codes.plain });
+});
+
+app.post('/api/2fa/disable', auth, json, (req, res) => {
+  if (rateLimited('2fa-set:' + req.user.id, 20)) return fail(res, 429, 'Слишком много попыток, подождите');
+  const u = q.userById.get(req.user.id);
+  if (!u.totp_secret) return res.json({ ok: true });
+  const step = checkTotp(u.totp_secret, req.body?.code, u.totp_last_step);
+  if (!step && !useBackupCode(u, req.body?.code)) return fail(res, 400, 'Неверный код');
+  q.disableTotp.run(u.id);
+  res.json({ ok: true });
 });
 
 app.patch('/api/me', auth, json, (req, res) => {
