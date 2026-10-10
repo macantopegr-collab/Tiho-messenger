@@ -1,5 +1,18 @@
 'use strict';
 (() => {
+  /* fxTunnel показывает страницу-предупреждение; запросам самого мессенджера она не нужна */
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    try {
+      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url, location.href);
+      if (url.origin === location.origin && !(input instanceof Request)) {
+        const headers = new Headers(init.headers || {});
+        headers.set('X-FxTunnel-Skip-Warning', '1');
+        init = { ...init, headers };
+      }
+    } catch { /* как есть */ }
+    return nativeFetch(input, init);
+  };
   const C = TihoCrypto;
   const root = document.getElementById('root');
   const AV_COLORS = ['#2747E0', '#B5452B', '#2F7D5B', '#7A4FB5', '#9A6A12', '#1F6F86', '#A3366B', '#4A5568'];

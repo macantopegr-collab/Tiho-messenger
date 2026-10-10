@@ -1,6 +1,6 @@
 /* Минимальный service worker: позволяет установить «Тихо» как приложение
    и открывать оболочку без сети. Запросы к API не кешируются. */
-const CACHE = 'tiho-v16';
+const CACHE = 'tiho-v17';
 const SHELL = ['/', '/index.html', '/app.css', '/app.js', '/crypto.js', '/gifts.js', '/stickers.js', '/manifest.json', '/icon.svg', '/icon-192.png'];
 
 self.addEventListener('install', (e) => {
