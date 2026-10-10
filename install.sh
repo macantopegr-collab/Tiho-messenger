@@ -85,6 +85,7 @@ EOF
   chmod 600 "$ENV_FILE"
 fi
 
+grep -q '^GIPHY_API_KEY=' "$ENV_FILE" || printf '\n# Поиск GIF: бесплатный ключ с developers.giphy.com (см. ИНСТРУКЦИЯ.md)\nGIPHY_API_KEY=\n' >> "$ENV_FILE"
 grep -q '^GOOGLE_CLIENT_ID=' "$ENV_FILE" || printf '\n# Вход через Google: Client ID из Google Cloud Console\nGOOGLE_CLIENT_ID=\n' >> "$ENV_FILE"
 
 say "Настраиваю автозапуск"

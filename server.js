@@ -21,6 +21,9 @@ const FILES_DIR = path.join(DATA_DIR, 'files');
 const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
 const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
 const GOOGLE_JWKS_URL = process.env.GOOGLE_JWKS_URL || 'https://www.googleapis.com/oauth2/v3/certs';
+const GIPHY_API_KEY = (process.env.GIPHY_API_KEY || '').trim();
+const GIPHY_API_BASE = process.env.GIPHY_API_BASE || 'https://api.giphy.com';
+const GIF_MEDIA_HOSTS = (process.env.GIF_MEDIA_HOSTS || 'giphy.com').split(',').map((x) => x.trim()).filter(Boolean);
 const MAX_FILE = Number(process.env.MAX_FILE_MB || 25) * 1024 * 1024;
 const SESSION_DAYS = 60;
 
@@ -355,7 +358,50 @@ const fail = (res, code, error) => res.status(code).json({ error });
 
 const json = express.json({ limit: '256kb' });
 
-app.get('/api/config', (req, res) => res.json({ maxFile: MAX_FILE, googleClientId: GOOGLE_CLIENT_ID || null, reactions: REACTIONS }));
+app.get('/api/config', (req, res) => res.json({ maxFile: MAX_FILE, googleClientId: GOOGLE_CLIENT_ID || null, reactions: REACTIONS, gifSearch: !!GIPHY_API_KEY }));
+
+/* ---------- Поиск GIF через GIPHY (через наш сервер, чтобы GIPHY не видел пользователей) ---------- */
+const gifUrl = (u) => '/api/gif/file?u=' + encodeURIComponent(u);
+function mediaAllowed(u) {
+  try {
+    const x = new URL(u);
+    return (x.protocol === 'https:' || x.hostname === '127.0.0.1') && GIF_MEDIA_HOSTS.some((h) => x.hostname === h || x.hostname.endsWith('.' + h));
+  } catch { return false; }
+}
+async function giphy(pathname, params) {
+  const url = new URL(GIPHY_API_BASE + pathname);
+  for (const [k, v] of Object.entries({ api_key: GIPHY_API_KEY, limit: 24, rating: 'pg-13', ...params })) url.searchParams.set(k, v);
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('GIPHY ' + r.status);
+  const data = (await r.json()).data || [];
+  return data.map((g) => {
+    const prev = g.images?.fixed_width_downsampled || g.images?.fixed_width || g.images?.original;
+    const full = g.images?.downsized_medium || g.images?.downsized || g.images?.original;
+    return prev?.url && full?.url ? { id: g.id, title: g.title || '', w: Number(full.width) || 0, h: Number(full.height) || 0, preview: gifUrl(prev.url), full: gifUrl(full.url) } : null;
+  }).filter(Boolean);
+}
+app.get('/api/gif/search', auth, async (req, res) => {
+  if (!GIPHY_API_KEY) return fail(res, 400, 'Поиск GIF не настроен на сервере');
+  if (rateLimited('gif:' + req.user.id, 120, 60000)) return fail(res, 429, 'Слишком часто');
+  const qv = String(req.query.q || '').trim().slice(0, 80);
+  try {
+    res.json({ gifs: qv ? await giphy('/v1/gifs/search', { q: qv, lang: 'ru', offset: Number(req.query.offset) || 0 }) : await giphy('/v1/gifs/trending', {}) });
+  } catch (e) { console.warn('GIF search failed:', e.message); fail(res, 502, 'GIPHY не отвечает'); }
+});
+app.get('/api/gif/file', auth, async (req, res) => {
+  const u = String(req.query.u || '');
+  if (!GIPHY_API_KEY || !mediaAllowed(u)) return fail(res, 404, 'Нет файла');
+  try {
+    const r = await fetch(u);
+    const len = Number(r.headers.get('content-length') || 0);
+    if (!r.ok || len > 15 * 1024 * 1024) return fail(res, 404, 'Нет файла');
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length > 15 * 1024 * 1024) return fail(res, 413, 'Слишком большой GIF');
+    res.setHeader('Content-Type', buf.slice(0, 3).toString() === 'GIF' ? 'image/gif' : (r.headers.get('content-type') || '').startsWith('image/webp') ? 'image/webp' : 'application/octet-stream');
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    res.end(buf);
+  } catch { fail(res, 502, 'GIPHY не отвечает'); }
+});
 
 /* ---------- Вход через Google (проверка ID-токена Google Identity Services) ---------- */
 let jwks = { keys: [], exp: 0 };

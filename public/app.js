@@ -205,6 +205,11 @@
       ? { id: Number(p.reply.id) || 0, name: str(p.reply.name, 80), text: str(p.reply.text, 200) } : null;
     const fwd = p.fwd ? str(p.fwd, 80) : '';
     if (p.t === 'text') return { t: 'text', text: str(p.text, 20000), reply, fwd };
+    if (p.t === 'sticker') {
+      const pack = str(p.pack, 20), id = str(p.id, 20);
+      if (!TihoStickers.svg(pack, id)) throw new Error('bad');
+      return { t: 'sticker', pack, id, reply, fwd };
+    }
     if (p.t === 'poll') {
       const options = Array.isArray(p.options) ? p.options.slice(0, 10).map((o) => str(o, 100)).filter(Boolean) : [];
       if (options.length < 2) throw new Error('bad');
@@ -213,7 +218,7 @@
     if (p.t === 'file') {
       return { t: 'file', fileId: str(p.fileId, 32), name: str(p.name, 200) || 'файл', size: Number(p.size) || 0,
         mime: str(p.mime, 100), key: str(p.key, 64), iv: str(p.iv, 32), w: Number(p.w) || 0, h: Number(p.h) || 0,
-        caption: str(p.caption, 4000), reply, fwd,
+        caption: str(p.caption, 4000), reply, fwd, gif: !!p.gif,
         dur: Math.max(0, Math.min(600, Number(p.dur) || 0)),
         wave: Array.isArray(p.wave) ? p.wave.slice(0, 64).map((v) => Math.max(0, Math.min(1, Number(v) || 0))) : null };
     }
@@ -242,10 +247,11 @@
   function previewOf(p) {
     if (!p) return '…';
     if (p.t === 'text') return p.text.replace(/\s+/g, ' ');
-    if (p.t === 'file') return (p.mime.startsWith('image/') ? 'Фото' : p.mime.startsWith('audio/') && p.wave ? 'Голосовое сообщение' : 'Файл: ' + p.name) + (p.caption ? ' · ' + p.caption : '');
+    if (p.t === 'file') return (isGif(p) ? 'GIF' : p.mime.startsWith('image/') ? 'Фото' : p.mime.startsWith('audio/') && p.wave ? 'Голосовое сообщение' : 'Файл: ' + p.name) + (p.caption ? ' · ' + p.caption : '');
     if (p.t === 'system') return p.text;
     if (p.t === 'deleted') return 'Сообщение удалено';
     if (p.t === 'poll') return '📊 ' + p.question;
+    if (p.t === 'sticker') return 'Стикер «' + TihoStickers.nameOf(p.pack, p.id) + '»';
     if (p.t === 'gift') return '🎁 ' + ((S.catalog?.gifts || []).find((x) => x.id === p.type)?.name ? `Подарок «${S.catalog.gifts.find((x) => x.id === p.type).name}»` : 'Подарок');
     return p.reason === 'before' ? 'Сообщение до вашего вступления' : 'Не удалось расшифровать';
   }
@@ -1233,6 +1239,9 @@
     }
     if (p.t === 'text') {
       bubble.append(...highlight(linkify(p.text)), meta);
+    } else if (p.t === 'sticker') {
+      bubble.classList.add('sticker-b');
+      bubble.append(h('div', { class: 'sticker', role: 'img', 'aria-label': 'Стикер ' + TihoStickers.nameOf(p.pack, p.id) }, TihoStickers.el(p.pack, p.id)), meta);
     } else if (p.t === 'poll') {
       bubble.classList.add('poll-b');
       bubble.append(pollEl(m, p, chat), meta);
@@ -1269,6 +1278,7 @@
       const items = [
         ['reply', 'Ответить', () => setReply(m, p, senderName)],
         p.t === 'text' && ['copy', 'Копировать текст', () => copyText(p.text)],
+        isGif(p) && ['image', 'Сохранить в «Мои GIF»', () => { saveGif(p); toast('GIF сохранён'); }],
         p.t === 'file' && ['download', 'Скачать файл', () => downloadFile(p)],
         p.t === 'file' && p.caption && ['copy', 'Копировать подпись', () => copyText(p.caption)],
         ['forward', 'Переслать', () => forwardMessage(m, p, senderName)],
@@ -1345,7 +1355,8 @@
     const ratio = p.w && p.h ? p.h / p.w : 0.75;
     const hgt = Math.min(420, Math.round(w * ratio));
     const ph = h('div', { class: 'ph', style: `width:${w}px;max-width:100%;height:${hgt}px` }, h('div', { class: 'spin' }));
-    const btn = h('button', { class: 'img-box', 'aria-label': 'Открыть фото: ' + p.name, style: `width:${w}px` }, ph);
+    const btn = h('button', { class: 'img-box', 'aria-label': (isGif(p) ? 'Открыть GIF: ' : 'Открыть фото: ') + p.name, style: `width:${w}px` }, ph,
+      isGif(p) ? h('span', { class: 'gif-badge' }, 'GIF') : null);
     getFileUrl(p).then((url) => {
       const img = h('img', { src: url, alt: p.caption || p.name, style: `aspect-ratio:${p.w && p.h ? p.w + '/' + p.h : 'auto'}` });
       ph.replaceWith(img);
@@ -1465,21 +1476,13 @@
       if (chat.type === 'direct') items.push(['gift', 'Подарок', () => openGiftShop(other(chat))]);
       openMenu(r.left, r.top - 160, items);
     } }, icon('attach', 24, 1.8));
-    const EMOJI = '😀 😂 🥹 😊 😍 🥰 😘 😎 🤔 😅 😭 😡 🥳 😴 🤗 🙃 👍 👎 👏 🙏 💪 🤝 👋 ✌️ ❤️ 💙 💚 🔥 ✨ 🎉 💯 ✅ ❌ ⚡ 🌙 ☀️ 🌧 🍕 ☕ 🎁 🐱 🐶 🌲 🏔 🚗 ✈️ 📍 ⏰'.split(' ');
-    const emojiPanel = h('div', { class: 'emoji-panel', hidden: true, role: 'dialog', 'aria-label': 'Эмодзи' }, EMOJI.map((e) =>
-      h('button', { type: 'button', 'aria-label': e, onclick: () => {
-        const st = input.selectionStart ?? input.value.length, en = input.selectionEnd ?? st;
-        input.value = input.value.slice(0, st) + e + input.value.slice(en);
-        input.focus(); input.setSelectionRange(st + e.length, st + e.length);
-        input.dispatchEvent(new Event('input'));
-      } }, e)));
-    const emojiBtn = h('button', { type: 'button', class: 'emoji-btn', 'aria-label': 'Эмодзи', 'aria-expanded': 'false', onclick: (ev) => {
+    const media = buildMediaPanel(chat, input);
+    const emojiBtn = h('button', { type: 'button', class: 'emoji-btn', 'aria-label': 'Эмодзи и стикеры', 'aria-expanded': 'false', onclick: (ev) => {
       ev.preventDefault();
-      emojiPanel.hidden = !emojiPanel.hidden;
-      emojiBtn.setAttribute('aria-expanded', String(!emojiPanel.hidden));
+      emojiBtn.setAttribute('aria-expanded', String(media.toggle()));
     } }, icon('smile', 22, 1.8));
     const row = h('div', { class: 'composer' }, attachBtn, h('div', { class: 'field' }, input, emojiBtn), actionBtn, fileInput);
-    const el = h('div', { class: 'composer-wrap' }, replyBox, uploadBox, emojiPanel, row);
+    const el = h('div', { class: 'composer-wrap' }, replyBox, uploadBox, media.el, row);
 
     /* Голосовое сообщение */
     async function startVoice() {
@@ -1656,7 +1659,7 @@
   }
 
   async function sendFiles(files, opts = {}) {
-    const chatId = S.active;
+    const chatId = opts.chatId || S.active;
     if (!chatId || !files.length) return;
     const input = S.refs.composer?.input;
     let caption = '';
@@ -1673,7 +1676,8 @@
         const encd = await C.encryptFile(buf);
         const { id } = await api('/api/files?chatId=' + chatId, { raw: encd.data });
         await sendPayload({ t: 'file', fileId: id, name: file.name, size: file.size, mime: file.type || 'application/octet-stream',
-          key: encd.key, iv: encd.iv, w, h: hh, caption, ...(opts.voice || {}) }, chatId);
+          key: encd.key, iv: encd.iv, w, h: hh, caption, ...(opts.voice || {}), ...(opts.gif || file.type === 'image/gif' ? { gif: true } : {}) }, chatId);
+        if (opts.gif || file.type === 'image/gif') saveGif({ fileId: id, name: file.name, size: file.size, mime: file.type || 'image/gif', key: encd.key, iv: encd.iv, w, h: hh });
         caption = '';
       } catch (e) { toast('Файл не отправлен: ' + e.message); }
       S.uploads--; renderUploads();
@@ -2217,6 +2221,114 @@
       try { await api('/api/2fa/disable', { body: { code: code.value } }); close(); toast('Двухфакторная защита отключена'); }
       catch (e) { err.textContent = e.message; btn.disabled = false; }
     });
+  }
+
+  /* ================= СТИКЕРЫ И GIF ================= */
+  const EMOJI = '😀 😂 🥹 😊 😍 🥰 😘 😎 🤔 😅 😭 😡 🥳 😴 🤗 🙃 😏 😬 🤯 🥺 👍 👎 👏 🙏 💪 🤝 👋 ✌️ 🤞 👀 ❤️ 💙 💚 🖤 💔 🔥 ✨ 🎉 💯 ✅ ❌ ⚡ 🌙 ☀️ 🌧 ❄️ 🍕 🍔 ☕ 🍺 🎂 🎁 🐱 🐶 🦊 🌲 🌸 🏔 🌊 🚗 ✈️ 🏠 📍 ⏰ 📷 🎵 ⚽ 🎮'.split(' ');
+  const recentKey = () => 'tiho-recent-stickers-' + S.me.id;
+  const gifKey = () => 'tiho-gifs-' + S.me.id;
+  function savedGifs() { return store.get(gifKey(), []); }
+  function saveGif(p) {
+    const list = savedGifs().filter((g) => g.fileId !== p.fileId);
+    list.unshift({ t: 'file', fileId: p.fileId, name: p.name, size: p.size, mime: p.mime, key: p.key, iv: p.iv, w: p.w, h: p.h, gif: true, caption: '' });
+    store.set(gifKey(), list.slice(0, 60));
+  }
+  const isGif = (p) => p?.t === 'file' && (p.gif || p.mime === 'image/gif');
+
+  function sendSticker(chatId, pack, id) {
+    const rec = store.get(recentKey(), []).filter((x) => !(x[0] === pack && x[1] === id));
+    rec.unshift([pack, id]);
+    store.set(recentKey(), rec.slice(0, 16));
+    sendPayload({ t: 'sticker', pack, id }, chatId);
+  }
+  async function sendSavedGif(chatId, g) {
+    try {
+      await api(`/api/files/${g.fileId}/share`, { body: { chatId } });
+      saveGif(g);
+      await sendPayload({ ...g }, chatId);
+    } catch (e) { toast('Не удалось отправить GIF: ' + e.message); }
+  }
+  async function sendGifFromUrl(chatId, gif) {
+    toast('Отправляю GIF…');
+    try {
+      const r = await fetch(gif.full, { credentials: 'same-origin' });
+      if (!r.ok) throw new Error('GIF недоступен');
+      const blob = await r.blob();
+      const file = new File([blob], 'gif.gif', { type: blob.type || 'image/gif' });
+      await sendFiles([file], { gif: true, chatId });
+    } catch (e) { toast(e.message); }
+  }
+
+  function buildMediaPanel(chat, input) {
+    const panel = h('div', { class: 'media-panel', hidden: true, role: 'dialog', 'aria-label': 'Эмодзи, стикеры и GIF' });
+    const tabs = h('div', { class: 'mp-tabs', role: 'tablist' });
+    const body = h('div', { class: 'mp-body' });
+    let cur = store.get('tiho-media-tab', 'emoji');
+    const insert = (e) => {
+      const st = input.selectionStart ?? input.value.length, en = input.selectionEnd ?? st;
+      input.value = input.value.slice(0, st) + e + input.value.slice(en);
+      input.focus(); input.setSelectionRange(st + e.length, st + e.length);
+      input.dispatchEvent(new Event('input'));
+    };
+    const stickerBtn = (pack, id) => h('button', { class: 'st-btn', 'aria-label': 'Стикер ' + TihoStickers.nameOf(pack, id), title: TihoStickers.nameOf(pack, id),
+      onclick: () => sendSticker(chat.id, pack, id) }, TihoStickers.el(pack, id));
+    const gifTile = (src, w, hh, onPick, label) => {
+      const img = h('img', { src, alt: label || 'GIF', loading: 'lazy' });
+      return h('button', { class: 'gif-tile', style: w && hh ? `aspect-ratio:${w}/${hh}` : '', 'aria-label': label || 'Отправить GIF', onclick: onPick }, img);
+    };
+    const draw = () => {
+      store.set('tiho-media-tab', cur);
+      tabs.querySelectorAll('button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.k === cur)));
+      clear(body);
+      if (cur === 'emoji') {
+        body.append(h('div', { class: 'emoji-grid' }, EMOJI.map((e) => h('button', { type: 'button', 'aria-label': e, onclick: () => insert(e) }, e))));
+      } else if (cur === 'stickers') {
+        const rec = store.get(recentKey(), []).filter(([p, i]) => TihoStickers.svg(p, i));
+        if (rec.length) body.append(h('div', { class: 'mp-label' }, 'Недавние'), h('div', { class: 'st-grid' }, rec.slice(0, 8).map(([p, i]) => stickerBtn(p, i))));
+        for (const pack of TihoStickers.PACKS) {
+          body.append(h('div', { class: 'mp-label' }, pack.name), h('div', { class: 'st-grid' }, Object.keys(pack.items).map((id) => stickerBtn(pack.id, id))));
+        }
+      } else {
+        const fileIn = h('input', { type: 'file', accept: 'image/gif,image/webp', class: 'sr', tabindex: '-1', 'aria-hidden': 'true',
+          onchange: () => { const f = fileIn.files[0]; fileIn.value = ''; if (f) sendFiles([f], { gif: true, chatId: chat.id }); } });
+        const mine = savedGifs();
+        const mineBox = h('div', { class: 'gif-grid' });
+        mine.forEach((g) => {
+          const tile = gifTile('', g.w, g.h, () => sendSavedGif(chat.id, g), 'Мой GIF');
+          getFileUrl(g).then((u) => { tile.querySelector('img').src = u; }).catch(() => tile.remove());
+          mineBox.append(tile);
+        });
+        body.append(h('div', { class: 'mp-row' }, h('button', { class: 'btn ghost', onclick: () => fileIn.click() }, icon('image', 18), 'GIF с устройства'), fileIn));
+        if (S.config.gifSearch) {
+          const q = h('input', { type: 'search', class: 'input', placeholder: 'Поиск GIF', 'aria-label': 'Поиск GIF' });
+          const results = h('div', { class: 'gif-grid' }, h('div', { class: 'spin dark sm' }));
+          const run = async () => {
+            clear(results).append(h('div', { class: 'spin sm dark' }));
+            try {
+              const { gifs } = await api('/api/gif/search?q=' + encodeURIComponent(q.value.trim()));
+              clear(results).append(...gifs.map((g) => gifTile(g.preview, g.w, g.h, () => sendGifFromUrl(chat.id, g), g.title)));
+              if (!gifs.length) results.append(h('span', { class: 'muted' }, 'Ничего не нашлось'));
+            } catch (e) { clear(results).append(h('span', { class: 'muted' }, e.message)); }
+          };
+          let t; q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 350); });
+          body.append(q);
+          if (mine.length) body.append(h('div', { class: 'mp-label' }, 'Мои GIF'), mineBox);
+          body.append(h('div', { class: 'mp-label' }, 'GIPHY'), results);
+          run();
+        } else {
+          body.append(h('div', { class: 'mp-label' }, 'Мои GIF'), mine.length ? mineBox
+            : h('p', { class: 'muted mp-note' }, 'Здесь появятся GIF, которые вы отправили или сохранили (меню GIF в чате → «Сохранить в Мои GIF»). Поиск по GIPHY включается в настройках сервера.'));
+        }
+      }
+    };
+    for (const [k, label] of [['emoji', 'Эмодзи'], ['stickers', 'Стикеры'], ['gif', 'GIF']]) {
+      tabs.append(h('button', { type: 'button', role: 'tab', 'data-k': k, onclick: () => { cur = k; draw(); } }, label));
+    }
+    panel.append(tabs, body);
+    return {
+      el: panel,
+      toggle(force) { panel.hidden = force !== undefined ? !force : !panel.hidden; if (!panel.hidden) draw(); return !panel.hidden; },
+    };
   }
 
   /* ================= ПАПКИ И АРХИВ ================= */
