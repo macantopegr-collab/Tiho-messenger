@@ -72,6 +72,7 @@ EOF2
   chmod 600 "$ENV_FILE"
 fi
 # Старые настройки дополняем новыми полями
+grep -q '^ANDROID_SHA256=' "$ENV_FILE" || printf '\n# Приложение Android: отпечаток ключа из сборки (fingerprint.txt, см. ИНСТРУКЦИЯ.md)\nANDROID_SHA256=\n' >> "$ENV_FILE"
 grep -q '^TURN_URL=' "$ENV_FILE" || printf '\n# Звонки через сложные сети: свой TURN-сервер (см. ИНСТРУКЦИЯ.md)\nTURN_URL=\nTURN_SECRET=\n' >> "$ENV_FILE"
 grep -q '^GIPHY_API_KEY=' "$ENV_FILE" || printf '\n# Поиск GIF: бесплатный ключ с developers.giphy.com (см. ИНСТРУКЦИЯ.md)\nGIPHY_API_KEY=\n' >> "$ENV_FILE"
 grep -q '^GOOGLE_CLIENT_ID=' "$ENV_FILE" || printf '\n# Вход через Google: Client ID из Google Cloud Console (см. ИНСТРУКЦИЯ.md)\nGOOGLE_CLIENT_ID=\n' >> "$ENV_FILE"

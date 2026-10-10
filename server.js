@@ -1426,6 +1426,14 @@ app.use('/api', (err, req, res, next) => {
   fail(res, 500, 'Ошибка сервера');
 });
 
+/* Подтверждение для приложения Android (Trusted Web Activity) — тогда оно открывается без адресной строки */
+app.get('/.well-known/assetlinks.json', (req, res) => {
+  const prints = String(process.env.ANDROID_SHA256 || '').split(',').map((x) => x.replace(/[^a-f0-9]/gi, '').toUpperCase())
+    .filter((x) => x.length === 64).map((x) => x.match(/../g).join(':'));
+  res.json(prints.length ? [{ relation: ['delegate_permission/common.handle_all_urls'],
+    target: { namespace: 'android_app', package_name: process.env.ANDROID_PACKAGE || 'ru.tiho.app', sha256_cert_fingerprints: prints } }] : []);
+});
+
 app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html', maxAge: '1h' }));
 app.get(/^\/(?!api|ws).*/, (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 

@@ -1,0 +1,66 @@
+# Сборка приложения «Тихо» для Android.
+# GitHub → вкладка Actions → «Android APK» → Run workflow → укажите постоянный адрес мессенджера.
+name: Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Постоянный адрес мессенджера, например https://chat.example.ru'
+        required: true
+      version:
+        description: 'Номер версии (целое число, увеличивайте при каждой сборке)'
+        required: false
+        default: '1'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      # Необязательно: свой ключ подписи в секретах репозитория (ANDROID_KEYSTORE_B64 и пароли).
+      # Без него APK подписывается отладочным ключом — приложение работает, но может показывать адресную строку.
+      - name: Ключ подписи
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/tiho.keystore"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/tiho.keystore" >> "$GITHUB_ENV"
+          fi
+
+      - name: Сборка
+        env:
+          APP_URL: ${{ inputs.url }}
+          VERSION_CODE: ${{ inputs.version }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          case "$APP_URL" in https://*) ;; *) echo "Адрес должен начинаться с https://"; exit 1;; esac
+          gradle -p android assembleRelease --no-daemon
+          cp android/app/build/outputs/apk/release/*.apk tiho.apk
+
+      - name: Отпечаток ключа (для ANDROID_SHA256 на сервере)
+        run: |
+          APKSIGNER=$(ls $ANDROID_HOME/build-tools/*/apksigner | tail -1)
+          $APKSIGNER verify --print-certs tiho.apk | grep -i "SHA-256" | head -1 | tee fingerprint.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiho-android
+          path: |
+            tiho.apk
+            fingerprint.txt

@@ -1,0 +1,45 @@
+plugins { id 'com.android.application' }
+
+// Адрес мессенджера передаётся при сборке: APP_URL=https://chat.example.ru
+def appUrl = (System.getenv('APP_URL') ?: 'https://example.com').replaceAll('/+$', '')
+def appHost = new URI(appUrl).host
+def ks = System.getenv('KEYSTORE_FILE')
+
+android {
+    namespace 'ru.tiho.app'
+    compileSdk 34
+    defaultConfig {
+        applicationId System.getenv('APP_ID') ?: 'ru.tiho.app'
+        minSdk 21
+        targetSdk 34
+        versionCode((System.getenv('VERSION_CODE') ?: '1') as int)
+        versionName System.getenv('VERSION_NAME') ?: '1.0'
+        manifestPlaceholders = [hostName: appHost, defaultUrl: appUrl + '/']
+        resValue 'string', 'asset_statements',
+            "[{\\\"relation\\\": [\\\"delegate_permission/common.handle_all_urls\\\"], \\\"target\\\": {\\\"namespace\\\": \\\"web\\\", \\\"site\\\": \\\"https://${appHost}\\\"}}]"
+    }
+    signingConfigs {
+        release {
+            if (ks) {
+                storeFile file(ks)
+                storePassword System.getenv('KEYSTORE_PASSWORD')
+                keyAlias System.getenv('KEY_ALIAS')
+                keyPassword System.getenv('KEY_PASSWORD')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig ks ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'com.google.androidbrowserhelper:androidbrowserhelper:2.5.0'
+}
