@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#080D0B;color:#E8F1EC;font:16px/1.45 system-ui,-apple-system,Roboto,sans-serif;padding:24px;box-sizing:border-box}
+  .box{max-width:360px;width:100%;text-align:center;display:flex;flex-direction:column;gap:14px}
+  .logo{width:72px;height:72px;border-radius:22px;background:#0C1511;margin:0 auto;display:flex;align-items:center;justify-content:center}
+  h1{font-size:22px;margin:4px 0 0}
+  p{margin:0;color:#83968C;font-size:14px}
+  button{height:48px;border-radius:14px;border:0;background:#2FD98C;color:#03140B;font:600 16px system-ui,sans-serif}
+  .ghost{background:#151E1A;color:#E8F1EC}
+  input{height:46px;border-radius:12px;border:1px solid #24302A;background:#0F1613;color:#E8F1EC;padding:0 12px;font-size:15px}
+  details{text-align:left}
+  summary{color:#83968C;font-size:14px;cursor:pointer;margin-bottom:8px}
+  .err{font-size:12px;color:#5d6f66;word-break:break-all}
+</style></head>
+<body><div class="box">
+  <div class="logo"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#3BE39B" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/></svg></div>
+  <h1>Нет связи с сервером</h1>
+  <p>Проверьте интернет. Если сервер «Тихо» выключен или сменил адрес — включите его или укажите новый адрес ниже.</p>
+  <button onclick="TihoAndroid.retry()">Повторить</button>
+  <details><summary>Адрес сервера</summary>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <input id="url" type="url" autocapitalize="none" spellcheck="false">
+      <button class="ghost" onclick="TihoAndroid.setUrl(document.getElementById('url').value)">Сохранить и открыть</button>
+    </div>
+  </details>
+  <p class="err" id="err"></p>
+</div>
+<script>
+  document.getElementById('url').value = TihoAndroid.getUrl();
+  document.getElementById('err').textContent = new URLSearchParams(location.search).get('e') || '';
+</script>
+</body></html>

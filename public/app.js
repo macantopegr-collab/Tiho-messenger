@@ -18,6 +18,10 @@
   const AV_COLORS = ['#2747E0', '#B5452B', '#2F7D5B', '#7A4FB5', '#9A6A12', '#1F6F86', '#A3366B', '#4A5568'];
   const NAME_COLORS = ['#3D63F0', '#D0573A', '#2E9A6A', '#9068D0', '#B8860B', '#2A93B0', '#C24A86', '#7A8699'];
   const MOBILE = () => matchMedia('(max-width:760px)').matches;
+  /* Внутри приложения для Android (WebView) есть мост window.TihoAndroid */
+  const APP = !!(window.TihoAndroid && window.TihoAndroid.isApp && window.TihoAndroid.isApp());
+  const hidden = () => document.hidden || !!window.__tihoBg;
+  if (APP) document.documentElement.classList.add('in-app');
   const COARSE = matchMedia('(pointer:coarse)').matches;
 
   /* ---------- иконки ---------- */
@@ -1161,7 +1165,7 @@
 
   function markRead() {
     const chat = S.chats.get(S.active);
-    if (!chat || document.hidden) return;
+    if (!chat || hidden()) return;
     const box = S.msgs.get(chat.id);
     const last = box?.list.filter((m) => typeof m.id === 'number').pop();
     if (!last) return;
@@ -1173,7 +1177,8 @@
       updateTitle();
     }
   }
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) markRead(); });
+  document.addEventListener('visibilitychange', () => { if (!hidden()) markRead(); });
+  document.addEventListener('tiho-fg', () => markRead());
 
   function statusLine(chat) {
     const ty = typingText(chat.id);
@@ -1883,10 +1888,17 @@
       h('span', { style: 'flex:1;min-width:0' }, h('b', null, p.name), h('small', null, fileSize(p.size))),
       icon('download', 20));
   }
+  async function saveBlobUrl(url, name, mime) {
+    const buf = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    let bin = '';
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    window.TihoAndroid.saveFile(btoa(bin), name, mime || 'application/octet-stream');
+  }
   async function downloadFile(p) {
     toast('Расшифровываю файл…');
     try {
       const url = await getFileUrl(p);
+      if (APP) { await saveBlobUrl(url, p.name, p.mime); return; }
       const a = h('a', { href: url, download: p.name });
       document.body.append(a); a.click(); a.remove();
     } catch (e) { toast(e.message); }
@@ -1897,7 +1909,8 @@
     const v = h('div', { class: 'viewer', role: 'dialog', 'aria-label': 'Просмотр фото', onclick: (e) => { if (e.target === v) close(); } },
       h('img', { src: url, alt: name }),
       h('button', { class: 'icon-btn', style: 'right:12px', 'aria-label': 'Закрыть', onclick: close }, icon('close', 26)),
-      h('a', { class: 'icon-btn', style: 'right:64px', href: url, download: name, 'aria-label': 'Скачать' }, icon('download', 24)));
+      h('a', { class: 'icon-btn', style: 'right:64px', href: url, download: name, 'aria-label': 'Скачать',
+        onclick: APP ? (e) => { e.preventDefault(); saveBlobUrl(url, name || 'photo.jpg', 'image/jpeg').catch(() => toast('Не удалось сохранить')); } : null }, icon('download', 24)));
     document.addEventListener('keydown', esc);
     document.body.append(v);
   }
@@ -2330,7 +2343,7 @@
     const isNew = !chat.lastMessage || msg.id > chat.lastMessage.id;
     if (isNew) chat.lastMessage = msg;
     const mine = msg.senderId === S.me.id;
-    const viewing = S.active === chat.id && !document.hidden;
+    const viewing = S.active === chat.id && !hidden();
     if (mine) { chat.lastReadId = Math.max(chat.lastReadId || 0, msg.id); const me = memberOf(chat, S.me.id); if (me) me.lastReadId = chat.lastReadId; }
     else if (isNew && msg.kind === 'msg') {
       S.typing.get(chat.id)?.delete(msg.senderId);
@@ -2359,6 +2372,13 @@
   function notify(chat, msg, mentioned) {
     if (isMuted(chat) && !mentioned) return;
     if (store.get('tiho-sound', false)) beep();
+    if (APP) {
+      if (!hidden() || !store.get('tiho-notify-app', true)) return;
+      const sender0 = memberOf(chat, msg.senderId)?.displayName || '';
+      const body0 = store.get('tiho-notify-text', false) && !isSecret(chat) ? previewOf(plainOf(msg)).slice(0, 140) : (mentioned ? 'Упомянул(а) вас' : 'Новое сообщение');
+      try { window.TihoAndroid.notify(chat.type === 'group' ? chatTitle(chat) : sender0 || 'Тихо', chat.type === 'group' && sender0 ? `${sender0}: ${body0}` : body0, 'chat-' + chat.id); } catch { /* нет моста */ }
+      return;
+    }
     if (!store.get('tiho-notify', false) || !('Notification' in window) || Notification.permission !== 'granted' || !document.hidden) return;
     const showText = store.get('tiho-notify-text', false);
     const sender = memberOf(chat, msg.senderId)?.displayName || '';
@@ -2448,7 +2468,7 @@
     if (d.type === 'channelPost') {
       const c = S.channels.get(d.channelId);
       if (!c) return loadChannels();
-      const viewing = S.channel === c.id && !document.hidden;
+      const viewing = S.channel === c.id && !hidden();
       if (d.post.author?.id !== S.me.id && !viewing) c.unread = (c.unread || 0) + 1;
       addPost(c.id, d.post); updateTitle();
       return;
@@ -2757,6 +2777,16 @@
   }
 
   async function openNotifications() {
+    if (APP) {
+      modal('Уведомления', [
+        h('div', { class: 'card' },
+          settingsSw('tiho-notify-app', 'Уведомления', 'Когда приложение свёрнуто', 'bell', null, true),
+          settingsSw('tiho-notify-text', 'Текст в уведомлениях', 'Показывать содержимое сообщений', 'eye'),
+          settingsSw('tiho-sound', 'Звук внутри приложения', 'Короткий сигнал о новом сообщении', 'volume')),
+        h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Уведомления приходят, пока «Тихо» работает в фоне. Если система закрыла приложение — откройте его снова. Разрешите «Тихо» работать в фоне в настройках батареи телефона, чтобы не пропускать сообщения и звонки.'),
+      ]);
+      return;
+    }
     const st = await pushState().catch(() => 'unsupported');
     const pushSw = h('button', { class: 'sw', role: 'switch', 'aria-checked': String(st === 'on'), 'aria-label': 'Push на телефон', disabled: st === 'unsupported' && !/iPhone|iPad/.test(navigator.userAgent) });
     pushSw.addEventListener('click', async () => {
@@ -3098,7 +3128,8 @@
       CALL.cur = { id: d.callId, peerId: d.from, user, kind: d.kind === 'video' ? 'video' : 'audio', outgoing: false, state: 'incoming', offer: d.data?.sdp, queue: [], muted: false, camOff: false };
       wsSend({ type: 'call', to: d.from, callId: d.callId, action: 'ringing' });
       ringtone(true, false); renderCallUI();
-      if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+      if (APP && hidden()) { try { window.TihoAndroid.notify(CALL.cur.kind === 'video' ? 'Входящий видеозвонок' : 'Входящий звонок', user.displayName, 'call'); } catch { /* нет моста */ } }
+      else if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
         try { new Notification(CALL.cur.kind === 'video' ? 'Входящий видеозвонок' : 'Входящий звонок', { body: user.displayName, tag: 'call', icon: '/icon-192.png' }); } catch { /* нет уведомлений */ }
       }
       return;
@@ -3293,6 +3324,7 @@
       case 'started':
         if (!chat || S.gcall) break;
         showCallInvite(chat, d);
+        if (APP && hidden() && !isMuted(chat)) { try { window.TihoAndroid.notify(chat.title, `${d.byName} начал(а) групповой звонок`, 'gcall-' + chat.id); } catch { /* нет моста */ } }
         break;
       case 'joined':
         if (!g) break;
@@ -3549,7 +3581,7 @@
   function markChannelRead() {
     const c = S.channels.get(S.channel);
     const last = S.cposts.get(S.channel)?.list.at(-1);
-    if (!c || !last || document.hidden || !c.subscribed) return;
+    if (!c || !last || hidden() || !c.subscribed) return;
     if (c.unread) { c.unread = 0; renderList(); updateTitle(); }
     api(`/api/channels/${c.id}/read`, { body: { postId: last.id } }).catch(() => {});
   }

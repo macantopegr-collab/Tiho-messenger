@@ -14,10 +14,10 @@ android {
         targetSdk 34
         versionCode((System.getenv('VERSION_CODE') ?: '1') as int)
         versionName System.getenv('VERSION_NAME') ?: '1.0'
-        manifestPlaceholders = [hostName: appHost, defaultUrl: appUrl + '/']
-        resValue 'string', 'asset_statements',
-            "[{\\\"relation\\\": [\\\"delegate_permission/common.handle_all_urls\\\"], \\\"target\\\": {\\\"namespace\\\": \\\"web\\\", \\\"site\\\": \\\"https://${appHost}\\\"}}]"
+        manifestPlaceholders = [hostName: appHost]
+        resValue 'string', 'app_url', appUrl
     }
+    buildFeatures { buildConfig true }
     signingConfigs {
         release {
             if (ks) {
@@ -41,5 +41,4 @@ android {
 }
 
 dependencies {
-    implementation 'com.google.androidbrowserhelper:androidbrowserhelper:2.5.0'
 }
