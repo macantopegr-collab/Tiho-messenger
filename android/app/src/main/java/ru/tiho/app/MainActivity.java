@@ -61,6 +61,8 @@ public class MainActivity extends Activity {
     private PermissionRequest pendingPermission;
     private volatile boolean offline = false;
     private int notifyId = 100;
+    static volatile boolean visible = false;
+    private String pendingAnswer = null;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -97,8 +99,40 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFY);
         }
 
+        if (prefs.getBoolean("background", true)) TihoService.start(this);
+        askBatteryExemption();
+        handleCallIntent(getIntent());
+
         Uri link = getIntent().getData();
         open(link != null && isOurs(link) ? link.toString() : baseUrl() + "/");
+    }
+
+    /** Чтобы система не усыпляла фоновую связь — один раз просим исключить из экономии батареи */
+    private void askBatteryExemption() {
+        if (Build.VERSION.SDK_INT < 23 || prefs.getBoolean("askedBattery", false)) return;
+        prefs.edit().putBoolean("askedBattery", true).apply();
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName())));
+            }
+        } catch (Exception ignored) { }
+    }
+
+    /** Открыли из уведомления о звонке: «Ответить» — отвечаем сразу, как только звонок появится в мессенджере */
+    private void handleCallIntent(Intent intent) {
+        if (intent == null || intent.getStringExtra("callId") == null) return;
+        TihoService.cancelCall(this);
+        if (intent.getBooleanExtra("answer", false)) {
+            pendingAnswer = intent.getStringExtra("callId");
+            injectAnswer();
+        }
+    }
+
+    private void injectAnswer() {
+        if (pendingAnswer == null) return;
+        String id = pendingAnswer.replaceAll("[^A-Za-z0-9-]", "");
+        web.evaluateJavascript("window.__tihoAutoAnswer='" + id + "';window.__tihoAnswerCall&&window.__tihoAnswerCall('" + id + "')", null);
     }
 
     /** fxTunnel показывает браузеру страницу-предупреждение; приложению она не нужна */
@@ -152,6 +186,7 @@ public class MainActivity extends Activity {
         @Override
         public void onPageFinished(WebView view, String url) {
             splash.setVisibility(View.GONE);
+            injectAnswer();
             CookieManager.getInstance().flush();
         }
 
@@ -235,6 +270,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        setIntent(intent);
+        handleCallIntent(intent);
         Uri link = intent.getData();
         if (link != null && isOurs(link)) open(link.toString());
     }
@@ -242,6 +279,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        visible = false;
         // WebView не ставим на паузу — так приходят сообщения и звонки, пока приложение свёрнуто
         web.evaluateJavascript("window.__tihoBg=true;document.dispatchEvent(new Event('tiho-bg'))", null);
         CookieManager.getInstance().flush();
@@ -250,6 +288,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        visible = true;
+        TihoService.cancelCall(this);
+        if (prefs.getBoolean("background", true)) TihoService.start(this);
         web.evaluateJavascript("window.__tihoBg=false;document.dispatchEvent(new Event('tiho-fg'))", null);
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm != null) nm.cancelAll();
@@ -273,6 +314,28 @@ public class MainActivity extends Activity {
     private class Bridge {
         @JavascriptInterface
         public boolean isApp() { return true; }
+
+        /** Звонок пришёл, пока приложение свёрнуто: показываем экран звонка системы */
+        @JavascriptInterface
+        public void incomingCall(String callId, int from, String name, boolean video) {
+            if (!visible) TihoService.showCall(MainActivity.this, callId, from, name, video);
+        }
+
+        @JavascriptInterface
+        public void callEnded() { TihoService.cancelCall(MainActivity.this); pendingAnswer = null; }
+
+        @JavascriptInterface
+        public void answered() { pendingAnswer = null; }
+
+        @JavascriptInterface
+        public boolean getBackground() { return prefs.getBoolean("background", true); }
+
+        @JavascriptInterface
+        public void setBackground(boolean on) {
+            prefs.edit().putBoolean("background", on).apply();
+            if (on) TihoService.start(MainActivity.this);
+            else startService(new Intent(MainActivity.this, TihoService.class).setAction(TihoService.ACTION_STOP));
+        }
 
         @JavascriptInterface
         public String getUrl() { return baseUrl(); }

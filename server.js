@@ -1714,8 +1714,7 @@ function deviceName(ua) {
   return [br, os].filter(Boolean).join(', ') || 'Неизвестное устройство';
 }
 function kickSessions(userId, sessionIds) {
-  const set = online.get(userId);
-  if (!set) return;
+  const set = new Set([...(online.get(userId) || []), ...(bgSockets.get(userId) || [])]);
   for (const ws of [...set]) if (!sessionIds || sessionIds.includes(ws.sessionId)) {
     try { ws.send(JSON.stringify({ type: 'loggedOut' })); } catch { /* закрыт */ }
     ws.close();
@@ -1983,6 +1982,7 @@ app.post('/api/push/test', auth, (req, res) => {
 /* Отправляем, только если у человека нет открытого мессенджера (нет WebSocket) */
 function pushTo(userId, payload, force = false) {
   if (!force && online.has(userId)) return;
+  if (!online.has(userId)) sendBg(userId, { type: 'bgNotify', title: payload.title, body: payload.body, tag: payload.tag || 'tiho', chatId: payload.chatId || null });
   const subs = db.prepare('SELECT * FROM push_subs WHERE user_id = ?').all(userId);
   for (const s of subs) {
     webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, JSON.stringify(payload), { TTL: 3600, urgency: payload.urgent ? 'high' : 'normal' })
@@ -2041,6 +2041,7 @@ function callAllowed(a, b) { return a !== b && !blockState(a, b) && !!q.chatByDi
 function finishCall(callId, status) {
   const c = db.prepare('SELECT * FROM calls WHERE id = ?').get(callId);
   liveCalls.delete(callId);
+  if (c) { sendBg(c.callee_id, { type: 'bgCallEnd', callId }); sendBg(c.caller_id, { type: 'bgCallEnd', callId }); }
   if (!c || c.ended_at) return;
   const final = c.answered_at ? 'ended' : status;
   db.prepare('UPDATE calls SET ended_at = ?, status = ? WHERE id = ?').run(now(), final, callId);
@@ -2061,7 +2062,16 @@ function handleCallSignal(user, m) {
     if (db.prepare('SELECT 1 FROM calls WHERE id = ?').get(callId)) return;
     const kind = m.kind === 'video' ? 'video' : 'audio';
     db.prepare('INSERT INTO calls (id, caller_id, callee_id, kind, started_at) VALUES (?, ?, ?, ?, ?)').run(callId, user.id, to, kind, now());
-    liveCalls.set(callId, { caller: user.id, callee: to });
+    const offerEvt = { type: 'call', from: user.id, fromUser: publicUser(q.userById.get(user.id)), callId, action: 'offer', kind: m.kind, data: m.data };
+    liveCalls.set(callId, { caller: user.id, callee: to, offer: offerEvt, answered: false });
+    if (!online.has(to) && bgSockets.has(to)) {
+      // приложение закрыто, но фоновая служба на связи — звоним через неё
+      sendBg(to, { type: 'bgCall', callId, from: user.id, name: user.display_name, kind });
+      pushTo(to, { title: user.display_name, body: kind === 'video' ? '📹 Входящий видеозвонок' : '📞 Входящий звонок', tag: 'call', url: '/', urgent: true }, true);
+      sendTo(user.id, { type: 'call', from: to, callId, action: 'ringing' });
+      setTimeout(() => { const l = liveCalls.get(callId); if (l && !l.answered) { sendTo(user.id, { type: 'call', from: to, callId, action: 'end' }); finishCall(callId, 'missed'); } }, 45000);
+      return;
+    }
     if (!online.has(to)) {
       setTimeout(() => finishCall(callId, 'missed'), 100);
       sendTo(user.id, { type: 'call', from: to, callId, action: 'unavailable' });
@@ -2071,7 +2081,7 @@ function handleCallSignal(user, m) {
   } else {
     const live = liveCalls.get(callId);
     if (!live || ![live.caller, live.callee].includes(user.id) || ![live.caller, live.callee].includes(to)) return;
-    if (action === 'answer') db.prepare("UPDATE calls SET answered_at = COALESCE(answered_at, ?), status = 'answered' WHERE id = ?").run(now(), callId);
+    if (action === 'answer') { db.prepare("UPDATE calls SET answered_at = COALESCE(answered_at, ?), status = 'answered' WHERE id = ?").run(now(), callId); live.answered = true; sendBg(live.callee, { type: 'bgCallEnd', callId }); }
     if (action === 'end') finishCall(callId, user.id === live.caller ? 'missed' : 'rejected');
     if (action === 'reject') finishCall(callId, 'rejected');
     if (action === 'busy') finishCall(callId, 'busy');
@@ -2627,6 +2637,13 @@ function handleGroupCall(user, m, ws) {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true, maxPayload: 96 * 1024 });
 const online = new Map(); // userId -> Set<ws>
+const bgSockets = new Map(); // userId -> Set<ws> — фоновая служба приложения Android (не считается «в сети»)
+function sendBg(userId, data) {
+  const set = bgSockets.get(userId);
+  if (!set) return;
+  const s = JSON.stringify(data);
+  for (const ws of set) if (ws.readyState === 1) ws.send(s);
+}
 
 function sendTo(userId, data) {
   const set = online.get(userId);
@@ -2649,9 +2666,24 @@ server.on('upgrade', (req, socket, head) => {
     ws.userId = user.id;
     ws.sessionId = user.session_id;
     ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+    if (/[?&]bg=1(&|$)/.test(req.url)) {
+      if (!bgSockets.has(user.id)) bgSockets.set(user.id, new Set());
+      bgSockets.get(user.id).add(ws);
+      ws.on('message', (raw) => {
+        let m; try { m = JSON.parse(raw); } catch { return; }
+        // из фона можно только отклонить звонок
+        if (m.type === 'call' && ['reject', 'busy'].includes(m.action)) handleCallSignal(user, m);
+      });
+      ws.on('close', () => { const set = bgSockets.get(user.id); if (set) { set.delete(ws); if (!set.size) bgSockets.delete(user.id); } });
+      return;
+    }
+    // звонок, который пришёл, пока приложение было закрыто: показываем его ещё раз
+    setTimeout(() => {
+      for (const [, live] of liveCalls) if (live.callee === user.id && !live.answered && live.offer && ws.readyState === 1) ws.send(JSON.stringify(live.offer));
+    }, 600);
     if (!online.has(user.id)) { online.set(user.id, new Set()); announcePresence(user.id, true); }
     online.get(user.id).add(ws);
-    ws.on('pong', () => { ws.isAlive = true; });
     ws.on('message', (raw) => {
       let m; try { m = JSON.parse(raw); } catch { return; }
       if (m.type === 'call') return handleCallSignal(user, m);
@@ -2670,6 +2702,7 @@ server.on('upgrade', (req, socket, head) => {
       if (!set.size) {
         online.delete(user.id); announcePresence(user.id, false);
         for (const [cid, live] of liveCalls) if (live.caller === user.id || live.callee === user.id) {
+          if (live.callee === user.id && !live.answered && bgSockets.has(user.id)) continue; // ещё звонит через фоновую службу
           const other = live.caller === user.id ? live.callee : live.caller;
           sendTo(other, { type: 'call', from: user.id, callId: cid, action: 'end' });
           finishCall(cid, live.caller === user.id ? 'missed' : 'rejected');

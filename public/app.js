@@ -2778,12 +2778,17 @@
 
   async function openNotifications() {
     if (APP) {
+      const bgOn = (() => { try { return window.TihoAndroid.getBackground(); } catch { return true; } })();
+      const bgSw = h('button', { class: 'sw', role: 'switch', 'aria-checked': String(bgOn), 'aria-label': 'Когда приложение закрыто',
+        onclick: () => { const v = bgSw.getAttribute('aria-checked') !== 'true'; bgSw.setAttribute('aria-checked', String(v)); try { window.TihoAndroid.setBackground(v); } catch { /* нет моста */ } } });
       modal('Уведомления', [
         h('div', { class: 'card' },
+          h('div', { class: 'card-row' }, h('span', { class: 'ic' }, icon('phone', 19, 1.9)),
+            h('span', { class: 'grow' }, h('b', null, 'Когда приложение закрыто'), h('small', null, 'Звонки на весь экран и уведомления о сообщениях. В шторке будет значок «Тихо на связи»')), bgSw),
           settingsSw('tiho-notify-app', 'Уведомления', 'Когда приложение свёрнуто', 'bell', null, true),
           settingsSw('tiho-notify-text', 'Текст в уведомлениях', 'Показывать содержимое сообщений', 'eye'),
           settingsSw('tiho-sound', 'Звук внутри приложения', 'Короткий сигнал о новом сообщении', 'volume')),
-        h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Уведомления приходят, пока «Тихо» работает в фоне. Если система закрыла приложение — откройте его снова. Разрешите «Тихо» работать в фоне в настройках батареи телефона, чтобы не пропускать сообщения и звонки.'),
+        h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.45' }, 'Чтобы звонки приходили всегда: Настройки телефона → Приложения → Тихо → Батарея → «Без ограничений». На Xiaomi, Huawei, Honor ещё включите «Автозапуск».'),
       ]);
       return;
     }
@@ -3128,7 +3133,8 @@
       CALL.cur = { id: d.callId, peerId: d.from, user, kind: d.kind === 'video' ? 'video' : 'audio', outgoing: false, state: 'incoming', offer: d.data?.sdp, queue: [], muted: false, camOff: false };
       wsSend({ type: 'call', to: d.from, callId: d.callId, action: 'ringing' });
       ringtone(true, false); renderCallUI();
-      if (APP && hidden()) { try { window.TihoAndroid.notify(CALL.cur.kind === 'video' ? 'Входящий видеозвонок' : 'Входящий звонок', user.displayName, 'call'); } catch { /* нет моста */ } }
+      if (APP && window.__tihoAutoAnswer === d.callId) { window.__tihoAutoAnswer = null; acceptCall(CALL.cur.kind === 'video'); return; }
+      if (APP && hidden()) { try { window.TihoAndroid.incomingCall(d.callId, d.from, user.displayName, CALL.cur.kind === 'video'); } catch { /* нет моста */ } }
       else if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
         try { new Notification(CALL.cur.kind === 'video' ? 'Входящий видеозвонок' : 'Входящий звонок', { body: user.displayName, tag: 'call', icon: '/icon-192.png' }); } catch { /* нет уведомлений */ }
       }
@@ -3152,9 +3158,11 @@
       default: break;
     }
   }
+  window.__tihoAnswerCall = (id) => { if (CALL.cur?.id === id && CALL.cur.state === 'incoming') { window.__tihoAutoAnswer = null; acceptCall(CALL.cur.kind === 'video'); } };
   async function acceptCall(withVideo) {
     const c = CALL.cur;
     if (!c || c.state !== 'incoming') return;
+    if (APP) { try { window.TihoAndroid.answered(); window.TihoAndroid.callEnded(); } catch { /* нет моста */ } }
     ringtone(false);
     try { c.local = await getMedia(c.kind === 'video' && withVideo); }
     catch { toast('Нет доступа к микрофону'); signal('reject'); return endCall(); }
@@ -3170,6 +3178,7 @@
   function endCall(msg) {
     const c = CALL.cur;
     if (!c) return;
+    if (APP) { try { window.TihoAndroid.callEnded(); } catch { /* нет моста */ } }
     ringtone(false); clearTimeout(c.timeout); clearInterval(c.tick);
     try { c.pc?.close(); } catch { /* уже закрыт */ }
     c.local?.getTracks().forEach((t) => t.stop());
