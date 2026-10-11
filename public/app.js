@@ -21,6 +21,18 @@
   /* Внутри приложения для Android (WebView) есть мост window.TihoAndroid */
   const APP = !!(window.TihoAndroid && window.TihoAndroid.isApp && window.TihoAndroid.isApp());
   const hidden = () => document.hidden || !!window.__tihoBg;
+  const IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  /* iPhone: высота экрана с учётом клавиатуры, чтобы поле ввода не пряталось под неё */
+  if (IOS) document.documentElement.classList.add('ios');
+  if (IOS && window.visualViewport) {
+    const fit = () => {
+      document.documentElement.style.setProperty('--app-h', window.visualViewport.height + 'px');
+      if (window.scrollY) window.scrollTo(0, 0);
+    };
+    window.visualViewport.addEventListener('resize', fit);
+    window.visualViewport.addEventListener('scroll', fit);
+    fit();
+  }
   if (APP) document.documentElement.classList.add('in-app');
   const COARSE = matchMedia('(pointer:coarse)').matches;
 
@@ -1729,7 +1741,7 @@
         });
         audio.addEventListener('ended', () => { reset(); playing = null; });
         await audio.play();
-      } catch { clear(btn).append(icon('play', 18)); toast('Не удалось воспроизвести'); }
+      } catch { clear(btn).append(icon('play', 18)); toast(IOS && /webm|ogg/.test(p.mime) ? 'Этот браузер не умеет играть такой формат (записано на Android). Обновите iOS до 17+' : 'Не удалось воспроизвести'); }
     });
     wave.addEventListener('click', (e) => {
       if (!playing || playing.p !== p) return;
@@ -1779,7 +1791,7 @@
       drawT = setTimeout(draw, 33);
     };
     const out = new MediaStream([...canvas.captureStream(30).getVideoTracks(), ...mic.getAudioTracks()]);
-    const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'].find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
+    const mime = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4;codecs=avc1,opus', 'video/mp4', 'video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'].find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
     const rec = new MediaRecorder(out, { ...(mime ? { mimeType: mime } : {}), videoBitsPerSecond: 800000, audioBitsPerSecond: 48000 });
     const chunks = [];
     let cancelled = false, tick;
@@ -1850,7 +1862,7 @@
         vid.src = await getFileUrl(p);
         roundPlaying = vid;
         await vid.play();
-      } catch { vid.removeAttribute('src'); reset(); toast('Не удалось воспроизвести'); }
+      } catch { vid.removeAttribute('src'); reset(); toast(IOS && /webm/.test(p.mime) ? 'Этот браузер не умеет играть такой формат (записано на Android). Обновите iOS до 17+' : 'Не удалось воспроизвести'); }
     });
     return box;
   }
@@ -2093,7 +2105,8 @@
       let stream;
       try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
       catch { toast('Нет доступа к микрофону. Разрешите его в настройках браузера'); return; }
-      const mime = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg;codecs=opus'].find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
+      // MP4/AAC играет везде, включая iPhone; если браузер так не умеет — WebM/Opus
+      const mime = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'].find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
       const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
       const chunks = [];
       const levels = [];
@@ -2894,7 +2907,29 @@
         store.set('tiho-accent', k); applyAccent();
         accents.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === e.currentTarget)));
       } }, h('span', null, a.name))));
+    let fsBlock = null;
+    if (APP) {
+      const on = (() => { try { return window.TihoAndroid.getFullscreen(); } catch { return false; } })();
+      const sw = h('button', { class: 'sw', role: 'switch', 'aria-checked': String(on), 'aria-label': 'Полноэкранный режим',
+        onclick: () => { const v = sw.getAttribute('aria-checked') !== 'true'; sw.setAttribute('aria-checked', String(v)); try { window.TihoAndroid.setFullscreen(v); } catch { /* нет моста */ } } });
+      fsBlock = h('div', { class: 'card' }, h('div', { class: 'card-row' }, h('span', { class: 'ic' }, icon('minimize', 19, 1.9)),
+        h('span', { class: 'grow' }, h('b', null, 'Полноэкранный режим'), h('small', null, 'Скрыть строку состояния и кнопки системы. Показать — смахнуть от края экрана')), sw));
+    } else if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
+      const isFs = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+      const btn = h('button', { class: 'btn ghost', onclick: () => {
+        const el = document.documentElement;
+        if (isFs()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+        else (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+        setTimeout(() => { btn.textContent = isFs() ? 'Выйти' : 'Включить'; }, 300);
+      } }, isFs() ? 'Выйти' : 'Включить');
+      fsBlock = h('div', { class: 'card' }, h('div', { class: 'card-row fs-row' }, h('span', { class: 'ic' }, icon('minimize', 19, 1.9)),
+        h('span', { class: 'grow' }, h('b', null, 'На весь экран'), h('small', null, 'Скрыть панели браузера')), btn));
+    } else if (IOS) {
+      fsBlock = h('div', { class: 'card' }, h('div', { class: 'card-row' }, h('span', { class: 'ic' }, icon('minimize', 19, 1.9)),
+        h('span', { class: 'grow' }, h('b', null, 'На весь экран на iPhone'), h('small', null, 'Safari: «Поделиться» → «На экран „Домой“». «Тихо» будет открываться как приложение, без панелей браузера, и с push-уведомлениями'))));
+    }
     modal('Внешний вид', [
+      fsBlock,
       h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Тема'), themeSeg),
       h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Цвет'), accents),
       h('div', { class: 'section' }, h('div', { class: 'section-title' }, 'Обои для всех чатов'), wallPicker(null)),
@@ -3056,6 +3091,12 @@
   /* ================= ЗВОНКИ ================= */
   const CALL = { cur: null };
   let ringIv = null, ringAc = null;
+  /* Safari включает звук только после касания: «будим» аудио при первом нажатии */
+  const unlockAudio = () => {
+    try { ringAc = ringAc || new (window.AudioContext || window.webkitAudioContext)(); } catch { /* без звука */ }
+    for (const ac of [ringAc, audioCtx, S.levelAc]) if (ac && ac.state === 'suspended') ac.resume().catch(() => {});
+  };
+  ['touchend', 'click', 'keydown'].forEach((ev) => document.addEventListener(ev, unlockAudio, { passive: true }));
   function ringtone(on, outgoing) {
     clearInterval(ringIv); ringIv = null;
     if (!on) return;
@@ -3589,7 +3630,7 @@
   }
   function markChannelRead() {
     const c = S.channels.get(S.channel);
-    const last = S.cposts.get(S.channel)?.list.at(-1);
+    const last = S.cposts.get(S.channel)?.list.slice(-1)[0];
     if (!c || !last || hidden() || !c.subscribed) return;
     if (c.unread) { c.unread = 0; renderList(); updateTitle(); }
     api(`/api/channels/${c.id}/read`, { body: { postId: last.id } }).catch(() => {});
@@ -3694,7 +3735,7 @@
     const box = S.cposts.get(cid);
     if (box) box.list = box.list.filter((x) => x.id !== pid);
     const c = S.channels.get(cid);
-    if (c?.lastPost?.id === pid) { c.lastPost = box?.list.at(-1) || null; }
+    if (c?.lastPost?.id === pid) { c.lastPost = box?.list.slice(-1)[0] || null; }
     renderList();
     if (S.channel === cid) renderPosts('keep');
   }
@@ -4306,9 +4347,16 @@
           return;
         } catch (e) { sttStatus(m.id, 'Сервер не ответил, распознаю на устройстве…'); }
       }
-      const ac = new OfflineAudioContext(1, 16000, 16000);
-      const decoded = await ac.decodeAudioData(buf);
+      let ac;
+      try { ac = new OfflineAudioContext(1, 16000, 16000); } catch { ac = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 44100, 44100); }
+      const decoded = await new Promise((res, rej) => { const pr = ac.decodeAudioData(buf, res, rej); if (pr?.then) pr.then(res, rej); });
       let audio = decoded.getChannelData(0);
+      if (decoded.sampleRate !== 16000) {
+        // старый Safari не умеет 16 кГц — пересчитываем вручную
+        const k = decoded.sampleRate / 16000, out = new Float32Array(Math.floor(audio.length / k));
+        for (let i = 0; i < out.length; i++) out[i] = audio[Math.floor(i * k)];
+        audio = out;
+      }
       if (decoded.numberOfChannels > 1) {
         const r = decoded.getChannelData(1);
         audio = audio.map((v, i) => (v + r[i]) / 2);

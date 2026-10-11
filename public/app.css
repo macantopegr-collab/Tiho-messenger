@@ -54,7 +54,7 @@ svg{display:block;flex:none}
 .input:focus{border-color:var(--accent)}
 .input::placeholder,textarea::placeholder{color:var(--muted)}
 .field-label{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:600;color:var(--text-2)}
-.av{border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600;flex:none;position:relative;user-select:none}
+.av{border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600;flex:none;position:relative;-webkit-user-select:none;user-select:none}
 .av .dot{position:absolute;right:0;bottom:0;width:13px;height:13px;border-radius:50%;background:var(--online);border:2px solid var(--surface)}
 .badge{min-width:22px;height:22px;padding:0 7px;border-radius:11px;background:var(--accent);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}
 .muted{color:var(--muted)}
@@ -182,10 +182,10 @@ svg{display:block;flex:none}
 
 /* ---------- окна ---------- */
 .modal-back{position:fixed;inset:0;background:var(--scrim);display:flex;align-items:center;justify-content:center;padding:16px;z-index:50}
-.modal{width:100%;max-width:440px;max-height:calc(100dvh - 32px);overflow:auto;background:var(--bg);border-radius:24px;box-shadow:var(--pop);display:flex;flex-direction:column}
+.modal{width:100%;max-width:440px;max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);overflow:auto;background:var(--bg);border-radius:24px;box-shadow:var(--pop);display:flex;flex-direction:column}
 @media (max-width:520px){
   .modal-back{align-items:flex-end;padding:0}
-  .modal{max-width:none;border-radius:24px 24px 0 0;max-height:92dvh;padding-bottom:env(safe-area-inset-bottom)}
+  .modal{max-width:none;border-radius:24px 24px 0 0;max-height:92vh;max-height:92dvh;padding-bottom:env(safe-area-inset-bottom)}
 }
 .modal-head{display:flex;align-items:center;gap:6px;padding:12px 8px 4px 20px;position:sticky;top:0;background:var(--bg);z-index:1}
 .modal-head h2{margin:0;flex:1;font-size:18px;font-weight:700}
@@ -709,7 +709,7 @@ mark{background:#FFD34D;color:#141413;border-radius:3px;padding:0 1px}
 .call-btn{width:66px;height:66px;border-radius:50%;border:0;display:flex;align-items:center;justify-content:center;color:#fff}
 .call-btn.red{background:#E5484D}
 .call-btn.green{background:#2FD98C;color:#03140B}
-.call-btn.glass{background:rgba(255,255,255,.14);backdrop-filter:blur(8px)}
+.call-btn.glass{background:rgba(255,255,255,.14);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
 .call-btn.glass.on{background:#fff;color:#07100C}
 .call-row .ci-prev{display:flex;align-items:center;gap:5px}
 .missed{color:var(--danger)!important}
@@ -766,7 +766,7 @@ mark{background:#FFD34D;color:#141413;border-radius:3px;padding:0 1px}
 
 /* ---------- v12: видеокружки ---------- */
 .round-btn{color:var(--muted);flex:none}
-.round-rec{position:fixed;inset:0;z-index:300;background:rgba(5,10,8,.88);backdrop-filter:blur(6px);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;padding:24px}
+.round-rec{position:fixed;inset:0;z-index:300;background:rgba(5,10,8,.88);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;padding:24px}
 .round-stage{position:relative;width:min(280px,72vw);aspect-ratio:1}
 .round-stage .round-live{width:100%;height:100%;border-radius:50%;object-fit:cover;background:#000;display:block}
 .round-stage.mirror .round-live{transform:scaleX(-1)}
@@ -974,3 +974,11 @@ body.secret-shield .msgs,body.secret-shield .chat-list .ci-prev{filter:blur(16px
 .stt-box{margin-top:6px;font-size:14px;line-height:1.4;white-space:pre-wrap;max-width:300px}
 .bubble.round-b .stt-btn,.bubble.round-b .stt-box{background:var(--surface);padding:6px 10px;border-radius:12px;color:var(--text)}
 .bubble.round-b .stt-btn{padding:0}
+
+/* ---------- v21: Safari и полноэкранный режим ---------- */
+#root{height:var(--app-h,100dvh)}
+/* iPhone: не увеличивать страницу при касании поля ввода (Safari приближает шрифты меньше 16px) */
+html.ios input,html.ios textarea,html.ios select{font-size:16px!important}
+html.ios .bubble,html.ios .chat-item,html.ios .post,html.ios .story-item,html.ios .mention-opt{-webkit-touch-callout:none}
+html.ios .chat-item,html.ios .story-item,html.ios .tabbar,html.ios .chips,html.ios .icon-btn,html.ios .btn{-webkit-user-select:none;user-select:none}
+.fs-row .btn{height:36px;padding:0 14px;font-size:14px}

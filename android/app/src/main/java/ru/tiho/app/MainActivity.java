@@ -76,6 +76,14 @@ public class MainActivity extends Activity {
         splash = buildSplash();
         root.addView(splash, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        // поле ввода не должно прятаться под клавиатуру и в полноэкранном режиме
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int bottom = Build.VERSION.SDK_INT >= 30 ? insets.getInsets(android.view.WindowInsets.Type.ime()).bottom : insets.getSystemWindowInsetBottom();
+            v.setPadding(0, 0, 0, fullscreen() ? bottom : 0);
+            return insets;
+        });
+        if (Build.VERSION.SDK_INT >= 28) getWindow().getAttributes().layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        applyFullscreen();
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -105,6 +113,36 @@ public class MainActivity extends Activity {
 
         Uri link = getIntent().getData();
         open(link != null && isOurs(link) ? link.toString() : baseUrl() + "/");
+    }
+
+    private boolean fullscreen() { return prefs.getBoolean("fullscreen", true); }
+
+    /** Полноэкранный режим: прячем строку состояния и кнопки навигации (появляются по свайпу от края) */
+    @SuppressWarnings("deprecation")
+    private void applyFullscreen() {
+        boolean on = fullscreen();
+        if (Build.VERSION.SDK_INT >= 30) {
+            getWindow().setDecorFitsSystemWindows(!on);
+            android.view.WindowInsetsController c = getWindow().getInsetsController();
+            if (c != null) {
+                if (on) {
+                    c.hide(android.view.WindowInsets.Type.statusBars() | android.view.WindowInsets.Type.navigationBars());
+                    c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                } else c.show(android.view.WindowInsets.Type.statusBars() | android.view.WindowInsets.Type.navigationBars());
+            }
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(on
+                    ? View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    : View.SYSTEM_UI_FLAG_VISIBLE);
+        }
+        getWindow().getDecorView().requestApplyInsets();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && fullscreen()) applyFullscreen();
     }
 
     /** Чтобы система не усыпляла фоновую связь — один раз просим исключить из экономии батареи */
@@ -326,6 +364,15 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void answered() { pendingAnswer = null; }
+
+        @JavascriptInterface
+        public boolean getFullscreen() { return fullscreen(); }
+
+        @JavascriptInterface
+        public void setFullscreen(boolean on) {
+            prefs.edit().putBoolean("fullscreen", on).apply();
+            runOnUiThread(MainActivity.this::applyFullscreen);
+        }
 
         @JavascriptInterface
         public boolean getBackground() { return prefs.getBoolean("background", true); }
